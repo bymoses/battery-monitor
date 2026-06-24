@@ -1,5 +1,7 @@
 # Battery Monitor
 
+![Battery Monitor screenshot](docs/assets/screenshot.png)
+
 Low-overhead Bun service that records laptop battery discharge snapshots and estimates which apps/processes are responsible. It serves a local interactive stacked chart.
 
 ## Run
