@@ -1,0 +1,47 @@
+services:
+  battery-monitor:
+    build: .
+    container_name: battery-monitor
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    # Required so /host/proc contains the same PIDs the collector sees for itself.
+    pid: host
+    ports:
+      - "127.0.0.1:3033:3030"
+    environment:
+      PORT: "3030"
+      HOST: "0.0.0.0"
+      POLL_INTERVAL_SECONDS: "30"
+      PROC_ROOT: "/host/proc"
+      SYS_POWER_SUPPLY: "/host/sys/class/power_supply"
+      DATA_DIR: "/data"
+      # Only heavy process snapshots when unplugged. Battery state is still sampled.
+      RECORD_WHEN_PLUGGED: "false"
+      # Keep disk writes bounded.
+      RETENTION_DAYS: "14"
+      # Adaptive idle/platform power left as System / baseline before attributing apps.
+      BASELINE_MODE: "adaptive"
+      BASELINE_WATTS: "4"
+      BASELINE_MIN_WATTS: "2"
+      BASELINE_MAX_WATTS: "6"
+      BASELINE_LOOKBACK_HOURS: "24"
+      HOST_CONFIG_DIR: "/host/config"
+      FOCUSED_WINDOW_FILE: "/data/focused-window.json"
+      VIDEO_RX_MBPS_THRESHOLD: "1"
+      # 0 = keep every active process; raise if your machine has huge process counts.
+      MAX_PROCESSES_PER_SAMPLE: "0"
+    volumes:
+      - ./data:/data
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - ${HOME}/.config:/host/config:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Safety rails: the monitor must stay cheaper than the apps it observes.
+    mem_limit: 128m
+    cpus: 0.25

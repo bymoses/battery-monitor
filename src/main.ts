@@ -1,0 +1,1062 @@
+import { Database } from "bun:sqlite";
+import { cpus } from "node:os";
+import path from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+} from "node:fs";
+
+type BatterySample = {
+  ts: number;
+  onBattery: boolean;
+  status: string;
+  capacity: number | null;
+  energyWh: number | null;
+  powerW: number | null;
+  source: string;
+};
+
+type EnvironmentSample = {
+  sampleId: number;
+  ts: number;
+  theme: string;
+  themeDetail: string;
+  brightnessPercent: number | null;
+  brightnessSource: string;
+  audioPlaying: boolean | null;
+  audioDetail: string;
+  videoStreaming: boolean | null;
+  videoDetail: string;
+  netRxMbps: number;
+  netTxMbps: number;
+  focusedApp: string;
+  focusedTitle: string;
+  focusedPid: number | null;
+  fanRpm: number | null;
+  fanSource: string;
+};
+
+type ProcNow = {
+  pid: number;
+  ppid: number;
+  name: string;
+  app: string;
+  cmd: string;
+  ticks: number;
+  startTime: number;
+  readBytes: number;
+  writeBytes: number;
+  rssMb: number;
+  isSelf: boolean;
+};
+
+type ProcPrev = Pick<ProcNow, "ticks" | "startTime" | "readBytes" | "writeBytes">;
+
+type ProcRow = ProcNow & {
+  cpuPercent: number;
+  cpuSeconds: number;
+  ioMb: number;
+  score: number;
+  estimatedWatts: number;
+};
+
+const cfg = {
+  host: env("HOST", "0.0.0.0"),
+  port: intEnv("PORT", 3030),
+  pollMs: intEnv("POLL_INTERVAL_SECONDS", 30) * 1000,
+  procRoot: env("PROC_ROOT", "/proc"),
+  powerRoot: env("SYS_POWER_SUPPLY", "/sys/class/power_supply"),
+  dataDir: env("DATA_DIR", path.resolve("data")),
+  recordWhenPlugged: boolEnv("RECORD_WHEN_PLUGGED", false),
+  forceCollect: boolEnv("FORCE_COLLECT", false),
+  retentionDays: intEnv("RETENTION_DAYS", 14),
+  baselineMode: env("BASELINE_MODE", "adaptive"),
+  baselineWatts: numEnv("BASELINE_WATTS", 4),
+  baselineMinWatts: numEnv("BASELINE_MIN_WATTS", 2),
+  baselineMaxWatts: numEnv("BASELINE_MAX_WATTS", 6),
+  baselineLookbackHours: numEnv("BASELINE_LOOKBACK_HOURS", 24),
+  hostConfigDir: env("HOST_CONFIG_DIR", "/host/config"),
+  focusedWindowFile: env("FOCUSED_WINDOW_FILE", "/data/focused-window.json"),
+  videoRxMbpsThreshold: numEnv("VIDEO_RX_MBPS_THRESHOLD", 1),
+  maxProcessesPerSample: intEnv("MAX_PROCESSES_PER_SAMPLE", 0),
+  clkTck: intEnv("CLK_TCK", 100),
+  cpuWeight: numEnv("CPU_WEIGHT", 1),
+  ioMbWeight: numEnv("IO_MB_WEIGHT", 0.02),
+};
+
+mkdirSync(cfg.dataDir, { recursive: true });
+const dbPath = path.join(cfg.dataDir, "battery-monitor.sqlite");
+const db = new Database(dbPath, { create: true });
+const indexHtml = readFileSync(path.join(import.meta.dir, "..", "public", "index.html"), "utf8");
+initDb();
+
+const cpuCount = Math.max(1, cpus().length || 1);
+const selfPid = process.pid;
+let prevTotalJiffies: number | null = null;
+let prevPollTs: number | null = null;
+let prevProcs = new Map<number, ProcPrev>();
+let prevBattery: BatterySample | null = null;
+let prevNet: { ts: number; rxBytes: number; txBytes: number } | null = null;
+let lastRetentionAt = 0;
+
+async function pollOnce() {
+  const ts = Date.now();
+  const battery = readBattery(ts);
+  const sampleId = insertBattery(battery);
+  const shouldCollectProcesses = battery.onBattery || cfg.recordWhenPlugged || cfg.forceCollect;
+
+  if (shouldCollectProcesses) {
+    const totalJiffies = readTotalJiffies();
+    const procs = readProcesses();
+    const rows = computeProcRows(procs, totalJiffies, battery.powerW);
+    insertProcessRows(sampleId, ts, rows);
+    insertEnvironment(readEnvironment(sampleId, ts, rows));
+    prevTotalJiffies = totalJiffies;
+    prevPollTs = ts;
+    prevProcs = new Map(procs.map((p) => [p.pid, { ticks: p.ticks, startTime: p.startTime, readBytes: p.readBytes, writeBytes: p.writeBytes }]));
+    const self = rows.find((r) => r.isSelf);
+    console.log(`[battery-monitor] ${new Date(ts).toISOString()} ${battery.onBattery ? "unplugged" : "plugged"} ${fmtPct(battery.capacity)} ${fmtW(battery.powerW)} rows=${rows.length} self=${fmtW(self?.estimatedWatts ?? 0)}`);
+  } else {
+    // Keep CPU/IO baselines fresh, but do not write process rows while plugged.
+    prevTotalJiffies = readTotalJiffies();
+    const procs = readProcesses();
+    prevPollTs = ts;
+    prevProcs = new Map(procs.map((p) => [p.pid, { ticks: p.ticks, startTime: p.startTime, readBytes: p.readBytes, writeBytes: p.writeBytes }]));
+    insertEnvironment(readEnvironment(sampleId, ts, []));
+    console.log(`[battery-monitor] ${new Date(ts).toISOString()} plugged ${fmtPct(battery.capacity)}; skipped process snapshot`);
+  }
+
+  prevBattery = battery;
+  if (ts - lastRetentionAt > 60 * 60 * 1000) {
+    pruneOld(ts);
+    lastRetentionAt = ts;
+  }
+}
+
+function currentBaselineWatts(totalPowerW: number): number {
+  if (totalPowerW <= 0) return 0;
+  if (cfg.baselineMode !== "adaptive") return Math.min(cfg.baselineWatts, totalPowerW);
+  const since = Date.now() - cfg.baselineLookbackHours * 60 * 60 * 1000;
+  const row = db.query("SELECT MIN(power_w) AS min_power FROM battery_samples WHERE on_battery=1 AND power_w > 0 AND ts >= ?").get(since) as { min_power: number | null } | null;
+  const observed = row?.min_power ?? cfg.baselineWatts;
+  return Math.min(totalPowerW, clamp(observed, cfg.baselineMinWatts, cfg.baselineMaxWatts));
+}
+
+function computeProcRows(procs: ProcNow[], totalJiffies: number, totalPowerW: number | null): ProcRow[] {
+  const totalDelta = prevTotalJiffies == null ? 0 : Math.max(0, totalJiffies - prevTotalJiffies);
+  const elapsedSec = prevPollTs == null ? cfg.pollMs / 1000 : Math.max(1, (Date.now() - prevPollTs) / 1000);
+
+  let rows: ProcRow[] = procs.map((p) => {
+    const prev = prevProcs.get(p.pid);
+    const sameProcess = prev && prev.startTime === p.startTime;
+    const deltaTicks = sameProcess ? Math.max(0, p.ticks - prev.ticks) : 0;
+    const readDelta = sameProcess ? Math.max(0, p.readBytes - prev.readBytes) : 0;
+    const writeDelta = sameProcess ? Math.max(0, p.writeBytes - prev.writeBytes) : 0;
+    const cpuSeconds = deltaTicks / cfg.clkTck;
+    const cpuPercent = totalDelta > 0 ? (deltaTicks / totalDelta) * cpuCount * 100 : (cpuSeconds / elapsedSec) * 100;
+    const ioMb = (readDelta + writeDelta) / 1024 / 1024;
+    const score = cpuSeconds * cfg.cpuWeight + ioMb * cfg.ioMbWeight;
+    return { ...p, cpuPercent, cpuSeconds, ioMb, score, estimatedWatts: 0 };
+  });
+
+  // Keep only processes that actually moved since the previous sample, plus this monitor.
+  rows = rows.filter((r) => r.score > 0 || r.isSelf);
+  if (cfg.maxProcessesPerSample > 0 && rows.length > cfg.maxProcessesPerSample) {
+    const self = rows.filter((r) => r.isSelf);
+    rows = rows
+      .filter((r) => !r.isSelf)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(0, cfg.maxProcessesPerSample - self.length))
+      .concat(self);
+  }
+
+  const power = Math.max(0, totalPowerW ?? 0);
+  const baseline = currentBaselineWatts(power);
+  const dynamicPower = Math.max(0, power - baseline);
+  const scoreSum = rows.reduce((sum, r) => sum + r.score, 0);
+  if (dynamicPower > 0 && scoreSum > 0) {
+    for (const row of rows) row.estimatedWatts = dynamicPower * (row.score / scoreSum);
+  }
+
+  // Pseudo-row prevents attributing unavoidable idle/platform watts to foreground apps.
+  rows.push({
+    pid: 0,
+    ppid: 0,
+    name: "system-baseline",
+    app: "System / baseline",
+    cmd: `Estimated idle/platform baseline (${baseline.toFixed(2)} W, ${cfg.baselineMode} mode)` ,
+    ticks: 0,
+    startTime: 0,
+    readBytes: 0,
+    writeBytes: 0,
+    rssMb: 0,
+    isSelf: false,
+    cpuPercent: 0,
+    cpuSeconds: 0,
+    ioMb: 0,
+    score: 0,
+    estimatedWatts: baseline,
+  });
+
+  return rows.sort((a, b) => b.estimatedWatts - a.estimatedWatts);
+}
+
+function readBattery(ts: number): BatterySample {
+  if (!existsSync(cfg.powerRoot)) {
+    return { ts, onBattery: false, status: "no power_supply", capacity: null, energyWh: null, powerW: null, source: cfg.powerRoot };
+  }
+
+  const entries = safeReaddir(cfg.powerRoot);
+  const batteryDirs = entries
+    .map((name) => path.join(cfg.powerRoot, name))
+    .filter((dir) => safeReadTrim(path.join(dir, "type")) === "Battery" || path.basename(dir).startsWith("BAT"));
+
+  const acOnline = entries
+    .map((name) => path.join(cfg.powerRoot, name))
+    .filter((dir) => !batteryDirs.includes(dir))
+    .map((dir) => safeReadTrim(path.join(dir, "online")))
+    .some((v) => v === "1");
+
+  if (batteryDirs.length === 0) {
+    return { ts, onBattery: cfg.forceCollect, status: acOnline ? "AC" : "no battery", capacity: null, energyWh: null, powerW: null, source: cfg.powerRoot };
+  }
+
+  let energyWh = 0;
+  let energyFullWh = 0;
+  let powerW = 0;
+  let haveEnergy = false;
+  let havePower = false;
+  const capacities: number[] = [];
+  const statuses: string[] = [];
+
+  for (const dir of batteryDirs) {
+    const status = safeReadTrim(path.join(dir, "status")) || "Unknown";
+    statuses.push(status);
+    const cap = readNum(path.join(dir, "capacity"));
+    if (cap != null) capacities.push(cap);
+
+    const eNow = readEnergyWh(dir, "now");
+    const eFull = readEnergyWh(dir, "full");
+    if (eNow != null) { energyWh += eNow; haveEnergy = true; }
+    if (eFull != null) energyFullWh += eFull;
+
+    const p = readPowerW(dir);
+    if (p != null) { powerW += p; havePower = true; }
+  }
+
+  let capacity: number | null = null;
+  if (haveEnergy && energyFullWh > 0) capacity = (energyWh / energyFullWh) * 100;
+  else if (capacities.length > 0) capacity = capacities.reduce((a, b) => a + b, 0) / capacities.length;
+
+  const status = [...new Set(statuses)].join(", ");
+  let onBattery = statuses.some((s) => s.toLowerCase() === "discharging");
+  if (!onBattery && !acOnline) onBattery = !statuses.every((s) => ["full", "charging"].includes(s.toLowerCase()));
+
+  let finalPowerW: number | null = havePower ? powerW : null;
+  if (finalPowerW == null && prevBattery?.energyWh != null && haveEnergy) {
+    const dtHours = Math.max(1 / 3600, (ts - prevBattery.ts) / 3600000);
+    const deltaWh = prevBattery.energyWh - energyWh;
+    if (onBattery && deltaWh >= 0) finalPowerW = deltaWh / dtHours;
+  }
+
+  return {
+    ts,
+    onBattery,
+    status,
+    capacity,
+    energyWh: haveEnergy ? energyWh : null,
+    powerW: finalPowerW,
+    source: batteryDirs.map((d) => path.basename(d)).join(","),
+  };
+}
+
+function readEnvironment(sampleId: number, ts: number, rows: ProcRow[]): EnvironmentSample {
+  const theme = readTheme();
+  const brightness = readBrightness();
+  const audio = readAudioState();
+  const net = readNetworkRates(ts);
+  const focused = readFocusedWindow();
+  const fan = readFanSpeed();
+  const browserWatts = rows
+    .filter((r) => ["Zen Browser", "Firefox", "Chrome/Chromium"].includes(r.app))
+    .reduce((sum, r) => sum + r.estimatedWatts, 0);
+  const browserCpu = rows
+    .filter((r) => ["Zen Browser", "Firefox", "Chrome/Chromium"].includes(r.app))
+    .reduce((sum, r) => sum + r.cpuPercent, 0);
+  const browserActive = browserWatts > 0.3 || browserCpu > 5;
+  const videoStreaming = net.rxMbps >= cfg.videoRxMbpsThreshold && browserActive;
+  const videoDetail = videoStreaming
+    ? `probable: ${net.rxMbps.toFixed(2)} Mbps RX + browser activity (${browserWatts.toFixed(2)} W, ${browserCpu.toFixed(1)}% CPU)`
+    : `not detected: ${net.rxMbps.toFixed(2)} Mbps RX; browser ${browserWatts.toFixed(2)} W, ${browserCpu.toFixed(1)}% CPU`;
+
+  return {
+    sampleId,
+    ts,
+    theme: theme.theme,
+    themeDetail: theme.detail,
+    brightnessPercent: brightness.percent,
+    brightnessSource: brightness.source,
+    audioPlaying: audio.playing,
+    audioDetail: audio.detail,
+    videoStreaming,
+    videoDetail,
+    netRxMbps: net.rxMbps,
+    netTxMbps: net.txMbps,
+    focusedApp: focused.app,
+    focusedTitle: focused.title,
+    focusedPid: focused.pid,
+    fanRpm: fan.rpm,
+    fanSource: fan.source,
+  };
+}
+
+function readFanSpeed(): { rpm: number | null; source: string } {
+  const hwmonRoot = path.join(path.dirname(cfg.powerRoot), "hwmon");
+  const fans: { rpm: number; source: string }[] = [];
+  for (const hwmon of safeReaddir(hwmonRoot)) {
+    const dir = path.join(hwmonRoot, hwmon);
+    const chip = safeReadTrim(path.join(dir, "name")) || hwmon;
+    for (const file of safeReaddir(dir)) {
+      const match = file.match(/^fan(\d+)_input$/);
+      if (!match) continue;
+      const rpm = readNum(path.join(dir, file));
+      if (rpm == null || rpm < 0) continue;
+      const label = safeReadTrim(path.join(dir, `fan${match[1]}_label`));
+      fans.push({ rpm, source: `${chip}/${label || file}` });
+    }
+  }
+
+  const thinkpad = safeReadTrim(path.join(cfg.procRoot, "acpi", "ibm", "fan"));
+  const speed = thinkpad.match(/^speed:\s*(\d+)/m);
+  if (speed) fans.push({ rpm: Number(speed[1]), source: "thinkpad_acpi" });
+
+  if (fans.length === 0) return { rpm: null, source: `no fan sensor in ${hwmonRoot}` };
+  const active = fans.sort((a, b) => b.rpm - a.rpm)[0];
+  return active;
+}
+
+function readFocusedWindow(): { app: string; title: string; pid: number | null } {
+  const text = safeReadTrim(cfg.focusedWindowFile);
+  if (!text) return { app: "", title: "", pid: null };
+  try {
+    const data = JSON.parse(text) as { app_id?: unknown; app?: unknown; title?: unknown; pid?: unknown };
+    const app = String(data.app_id ?? data.app ?? "").slice(0, 120);
+    const title = String(data.title ?? "").slice(0, 240);
+    const pid = Number(data.pid);
+    return { app, title, pid: Number.isFinite(pid) ? pid : null };
+  } catch {
+    return { app: "", title: "", pid: null };
+  }
+}
+
+function readTheme(): { theme: string; detail: string } {
+  const checks = [
+    path.join(cfg.hostConfigDir, "gtk-3.0", "settings.ini"),
+    path.join(cfg.hostConfigDir, "gtk-4.0", "settings.ini"),
+    path.join(cfg.hostConfigDir, "kdeglobals"),
+  ];
+  for (const file of checks) {
+    const text = safeReadTrim(file);
+    if (!text) continue;
+    const lower = text.toLowerCase();
+    const base = path.basename(path.dirname(file)) === "." ? path.basename(file) : `${path.basename(path.dirname(file))}/${path.basename(file)}`;
+    if (/gtk-application-prefer-dark-theme\s*=\s*1/i.test(text)) return { theme: "dark", detail: base };
+    if (/gtk-application-prefer-dark-theme\s*=\s*0/i.test(text)) return { theme: "light", detail: base };
+    const themeLine = lower.split("\n").find((l) => l.includes("theme") || l.includes("colorscheme") || l.includes("lookandfeel"));
+    if (themeLine?.includes("dark")) return { theme: "dark", detail: `${base}: ${themeLine.slice(0, 80)}` };
+    if (themeLine?.includes("light")) return { theme: "light", detail: `${base}: ${themeLine.slice(0, 80)}` };
+  }
+  return { theme: "unknown", detail: `no readable theme config in ${cfg.hostConfigDir}` };
+}
+
+function readBrightness(): { percent: number | null; source: string } {
+  const root = path.join(path.dirname(cfg.powerRoot), "backlight");
+  const rows = safeReaddir(root)
+    .map((name) => {
+      const dir = path.join(root, name);
+      const current = readNum(path.join(dir, "brightness"));
+      const max = readNum(path.join(dir, "max_brightness"));
+      return current != null && max && max > 0 ? { name, percent: (current / max) * 100 } : null;
+    })
+    .filter((x): x is { name: string; percent: number } => Boolean(x));
+  if (rows.length === 0) return { percent: null, source: root };
+  const best = rows.sort((a, b) => b.percent - a.percent)[0];
+  return { percent: best.percent, source: best.name };
+}
+
+function readAudioState(): { playing: boolean | null; detail: string } {
+  const asound = path.join(cfg.procRoot, "asound");
+  if (!existsSync(asound)) return { playing: null, detail: "no /proc/asound" };
+  for (const card of safeReaddir(asound).filter((n) => n.startsWith("card"))) {
+    const cardDir = path.join(asound, card);
+    for (const pcm of safeReaddir(cardDir).filter((n) => /^pcm\d+p$/.test(n))) {
+      const pcmDir = path.join(cardDir, pcm, "sub0");
+      const status = safeReadTrim(path.join(pcmDir, "status"));
+      if (status.includes("RUNNING")) return { playing: true, detail: `${card}/${pcm} RUNNING` };
+    }
+  }
+  return { playing: false, detail: "all playback PCM devices idle/suspended" };
+}
+
+function readNetworkRates(ts: number): { rxMbps: number; txMbps: number } {
+  const counters = readNetworkCounters();
+  if (!prevNet) {
+    prevNet = { ts, ...counters };
+    return { rxMbps: 0, txMbps: 0 };
+  }
+  const dt = Math.max(1, (ts - prevNet.ts) / 1000);
+  const rxMbps = Math.max(0, counters.rxBytes - prevNet.rxBytes) * 8 / dt / 1_000_000;
+  const txMbps = Math.max(0, counters.txBytes - prevNet.txBytes) * 8 / dt / 1_000_000;
+  prevNet = { ts, ...counters };
+  return { rxMbps, txMbps };
+}
+
+function readNetworkCounters(): { rxBytes: number; txBytes: number } {
+  const text = safeReadTrim(path.join(cfg.procRoot, "net", "dev"));
+  let rxBytes = 0;
+  let txBytes = 0;
+  for (const line of text.split("\n")) {
+    if (!line.includes(":")) continue;
+    const [ifaceRaw, rest] = line.split(":");
+    const iface = ifaceRaw.trim();
+    if (!iface || iface === "lo" || iface.startsWith("docker") || iface.startsWith("br-") || iface.startsWith("veth")) continue;
+    const parts = rest.trim().split(/\s+/).map(Number);
+    if (parts.length >= 16) {
+      rxBytes += parts[0] || 0;
+      txBytes += parts[8] || 0;
+    }
+  }
+  return { rxBytes, txBytes };
+}
+
+function readProcesses(): ProcNow[] {
+  const out: ProcNow[] = [];
+  for (const name of safeReaddir(cfg.procRoot)) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    const dir = path.join(cfg.procRoot, name);
+    const statText = safeReadTrim(path.join(dir, "stat"));
+    if (!statText) continue;
+    const parsed = parseProcStat(statText);
+    if (!parsed) continue;
+    const comm = safeReadTrim(path.join(dir, "comm")) || parsed.comm;
+    const cmd = readCmdline(path.join(dir, "cmdline")) || comm;
+    const io = readProcIo(path.join(dir, "io"));
+    const isSelf = pid === selfPid || looksLikeSelf(pid, cmd, comm);
+    out.push({
+      pid,
+      ppid: parsed.ppid,
+      name: comm.slice(0, 80),
+      app: "",
+      cmd: cmd.slice(0, 300),
+      ticks: parsed.utime + parsed.stime,
+      startTime: parsed.startTime,
+      readBytes: io.readBytes,
+      writeBytes: io.writeBytes,
+      rssMb: (parsed.rssPages * 4096) / 1024 / 1024,
+      isSelf,
+    });
+  }
+  assignProcessGroups(out);
+  return out;
+}
+
+function parseProcStat(text: string) {
+  const open = text.indexOf("(");
+  const close = text.lastIndexOf(")");
+  if (open < 0 || close < open) return null;
+  const comm = text.slice(open + 1, close);
+  const rest = text.slice(close + 2).trim().split(/\s+/);
+  if (rest.length < 22) return null;
+  return {
+    comm,
+    ppid: Number(rest[1]) || 0,
+    utime: Number(rest[11]) || 0,
+    stime: Number(rest[12]) || 0,
+    startTime: Number(rest[19]) || 0,
+    rssPages: Number(rest[21]) || 0,
+  };
+}
+
+function readTotalJiffies(): number {
+  const text = safeReadTrim(path.join(cfg.procRoot, "stat"));
+  const line = text.split("\n")[0] || "";
+  const parts = line.trim().split(/\s+/).slice(1).map(Number).filter(Number.isFinite);
+  return parts.reduce((a, b) => a + b, 0);
+}
+
+function readProcIo(file: string) {
+  const text = safeReadTrim(file);
+  let readBytes = 0;
+  let writeBytes = 0;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("read_bytes:")) readBytes = Number(line.split(/\s+/)[1]) || 0;
+    if (line.startsWith("write_bytes:")) writeBytes = Number(line.split(/\s+/)[1]) || 0;
+  }
+  return { readBytes, writeBytes };
+}
+
+function readCmdline(file: string): string {
+  try {
+    const raw = readFileSync(file, "utf8");
+    return raw.replace(/\0/g, " ").replace(/\s+/g, " ").trim();
+  } catch {
+    return "";
+  }
+}
+
+function looksLikeSelf(pid: number, cmd: string, comm: string): boolean {
+  if (comm !== "bun" && !cmd.includes("bun")) return false;
+  if (cmd.includes("battery-monitor") || cmd.includes("src/main.ts")) return true;
+  try {
+    const cwd = readlinkSync(path.join(cfg.procRoot, String(pid), "cwd"));
+    return cwd.includes("battery-monitor") || cwd === "/app";
+  } catch {
+    return false;
+  }
+}
+
+function assignProcessGroups(procs: ProcNow[]) {
+  const byPid = new Map(procs.map((p) => [p.pid, p]));
+
+  for (const proc of procs) {
+    if (proc.isSelf) {
+      proc.app = "battery-monitor";
+      continue;
+    }
+
+    const inherited = ancestorOwnerGroup(proc, byPid);
+    const direct = directProcessGroup(proc);
+
+    // Browser helper names like "Isolated Web Content" do not carry the browser name
+    // in /proc, so inherit the app from Zen/Firefox/Chrome parent processes.
+    if (inherited && (isBrowserHelper(proc) || inherited === "Docker" || isElectronHelper(proc))) {
+      proc.app = inherited;
+    } else {
+      proc.app = direct ?? fallbackAppName(proc.name, proc.cmd);
+    }
+  }
+}
+
+function ancestorOwnerGroup(proc: ProcNow, byPid: Map<number, ProcNow>): string | null {
+  let current = byPid.get(proc.ppid);
+  const seen = new Set<number>();
+  for (let depth = 0; current && depth < 12 && !seen.has(current.pid); depth++) {
+    seen.add(current.pid);
+    if (current.isSelf) return "battery-monitor";
+    const owner = directOwnerGroup(current);
+    if (owner) return owner;
+    current = byPid.get(current.ppid);
+  }
+  return null;
+}
+
+function directOwnerGroup(proc: ProcNow): string | null {
+  const direct = directProcessGroup(proc);
+  if (!direct) return null;
+  return [
+    "Zen Browser",
+    "Firefox",
+    "Chrome/Chromium",
+    "Docker",
+    "VS Code",
+    "Slack",
+    "Discord",
+    "Spotify",
+  ].includes(direct) ? direct : null;
+}
+
+function directProcessGroup(proc: Pick<ProcNow, "name" | "cmd">): string | null {
+  const comm = proc.name;
+  const c = `${proc.name} ${proc.cmd}`.toLowerCase();
+
+  if (c.includes("zen-bin") || comm === "zen") return "Zen Browser";
+  if (c.includes("firefox") || c.includes("librewolf") || c.includes("waterfox")) return "Firefox";
+  if (c.includes("google-chrome") || c.includes("chrome --") || c.includes("chromium") || c.includes("brave-browser")) return "Chrome/Chromium";
+
+  if (c.includes("docker") || c.includes("dockerd") || c.includes("containerd") || c.includes("runc") || c.includes("buildkit")) return "Docker";
+  if (comm.startsWith("kworker")) return "Kernel workers";
+  if (c.includes("code") && (c.includes("vscode") || c.includes("visual studio code") || comm === "code")) return "VS Code";
+  if (c.includes("slack")) return "Slack";
+  if (c.includes("discord")) return "Discord";
+  if (c.includes("spotify")) return "Spotify";
+
+  if (c.includes("wayland") || c.includes("kwin") || c.includes("gnome-shell") || c.includes("niri")) return "Desktop shell";
+  if (c.includes("xorg") || c.includes("xwayland")) return "Display server";
+  if (c.includes("node ") || comm === "node") return "Node.js";
+  if (comm === "bun") return "Bun";
+  return null;
+}
+
+function isBrowserHelper(proc: Pick<ProcNow, "name" | "cmd">): boolean {
+  const c = `${proc.name} ${proc.cmd}`.toLowerCase();
+  return c.includes("isolated web")
+    || c.includes("web content")
+    || c.includes("webextensions")
+    || c.includes("web extension")
+    || c.includes("socket process")
+    || c.includes("rdd process")
+    || c.includes("utility process")
+    || c.includes("gpu process")
+    || c.includes("privileged cont")
+    || c.includes("preallocated");
+}
+
+function isElectronHelper(proc: Pick<ProcNow, "name" | "cmd">): boolean {
+  const c = `${proc.name} ${proc.cmd}`.toLowerCase();
+  return c.includes("--type=renderer")
+    || c.includes("--type=gpu-process")
+    || c.includes("--type=utility")
+    || c.includes("--type=zygote");
+}
+
+function fallbackAppName(comm: string, cmd: string): string {
+  return comm || firstWord(cmd) || "unknown";
+}
+
+function initDb() {
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA synchronous = NORMAL");
+  db.run("PRAGMA foreign_keys = ON");
+  db.run(`CREATE TABLE IF NOT EXISTS battery_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    on_battery INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    capacity REAL,
+    energy_wh REAL,
+    power_w REAL,
+    source TEXT NOT NULL
+  )`);
+  // Legacy denormalized table. Kept readable until retention prunes old rows.
+  db.run(`CREATE TABLE IF NOT EXISTS process_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    pid INTEGER NOT NULL,
+    ppid INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    app TEXT NOT NULL,
+    cmd TEXT NOT NULL,
+    cpu_percent REAL NOT NULL,
+    cpu_seconds REAL NOT NULL,
+    io_mb REAL NOT NULL,
+    rss_mb REAL NOT NULL,
+    score REAL NOT NULL,
+    estimated_watts REAL NOT NULL,
+    is_self INTEGER NOT NULL
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS process_identities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app TEXT NOT NULL,
+    name TEXT NOT NULL,
+    cmd TEXT NOT NULL,
+    UNIQUE(app, name, cmd)
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS process_samples_v2 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    pid INTEGER NOT NULL,
+    ppid INTEGER NOT NULL,
+    process_id INTEGER NOT NULL,
+    cpu_percent REAL NOT NULL,
+    cpu_seconds REAL NOT NULL,
+    io_mb REAL NOT NULL,
+    rss_mb REAL NOT NULL,
+    score REAL NOT NULL,
+    estimated_watts REAL NOT NULL,
+    is_self INTEGER NOT NULL,
+    FOREIGN KEY(process_id) REFERENCES process_identities(id)
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS environment_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    theme TEXT NOT NULL,
+    theme_detail TEXT NOT NULL,
+    brightness_percent REAL,
+    brightness_source TEXT NOT NULL,
+    audio_playing INTEGER,
+    audio_detail TEXT NOT NULL,
+    video_streaming INTEGER,
+    video_detail TEXT NOT NULL,
+    net_rx_mbps REAL NOT NULL,
+    net_tx_mbps REAL NOT NULL,
+    focused_app TEXT NOT NULL DEFAULT '',
+    focused_title TEXT NOT NULL DEFAULT '',
+    focused_pid INTEGER,
+    fan_rpm REAL,
+    fan_source TEXT NOT NULL DEFAULT ''
+  )`);
+  addColumnIfMissing("environment_samples", "focused_app", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing("environment_samples", "focused_title", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing("environment_samples", "focused_pid", "INTEGER");
+  addColumnIfMissing("environment_samples", "fan_rpm", "REAL");
+  addColumnIfMissing("environment_samples", "fan_source", "TEXT NOT NULL DEFAULT ''");
+  db.run("CREATE INDEX IF NOT EXISTS idx_battery_ts ON battery_samples(ts)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_process_ts_app ON process_samples(ts, app)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_process_sample ON process_samples(sample_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_ts ON process_samples_v2(ts)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_sample ON process_samples_v2(sample_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_identity ON process_samples_v2(process_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_environment_ts ON environment_samples(ts)");
+}
+
+function addColumnIfMissing(table: string, column: string, definition: string) {
+  const cols = db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+function insertBattery(b: BatterySample): number {
+  const res = db.run(
+    "INSERT INTO battery_samples (ts,on_battery,status,capacity,energy_wh,power_w,source) VALUES (?,?,?,?,?,?,?)",
+    b.ts,
+    b.onBattery ? 1 : 0,
+    b.status,
+    b.capacity,
+    b.energyWh,
+    b.powerW,
+    b.source,
+  );
+  return Number(res.lastInsertRowid);
+}
+
+const insertRowsTx = db.transaction((sampleId: number, ts: number, rows: ProcRow[]) => {
+  const identityInsert = db.prepare("INSERT OR IGNORE INTO process_identities (app,name,cmd) VALUES (?,?,?)");
+  const identitySelect = db.prepare("SELECT id FROM process_identities WHERE app=? AND name=? AND cmd=?");
+  const sampleInsert = db.prepare(`INSERT INTO process_samples_v2
+    (sample_id,ts,pid,ppid,process_id,cpu_percent,cpu_seconds,io_mb,rss_mb,score,estimated_watts,is_self)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+  for (const r of rows) {
+    identityInsert.run(r.app, r.name, r.cmd);
+    const identity = identitySelect.get(r.app, r.name, r.cmd) as { id: number };
+    sampleInsert.run(sampleId, ts, r.pid, r.ppid, identity.id, r.cpuPercent, r.cpuSeconds, r.ioMb, r.rssMb, r.score, r.estimatedWatts, r.isSelf ? 1 : 0);
+  }
+});
+
+function insertProcessRows(sampleId: number, ts: number, rows: ProcRow[]) {
+  insertRowsTx(sampleId, ts, rows);
+}
+
+function insertEnvironment(e: EnvironmentSample) {
+  db.run(`INSERT INTO environment_samples
+    (sample_id,ts,theme,theme_detail,brightness_percent,brightness_source,audio_playing,audio_detail,video_streaming,video_detail,net_rx_mbps,net_tx_mbps,focused_app,focused_title,focused_pid,fan_rpm,fan_source)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    e.sampleId,
+    e.ts,
+    e.theme,
+    e.themeDetail,
+    e.brightnessPercent,
+    e.brightnessSource,
+    e.audioPlaying == null ? null : e.audioPlaying ? 1 : 0,
+    e.audioDetail,
+    e.videoStreaming == null ? null : e.videoStreaming ? 1 : 0,
+    e.videoDetail,
+    e.netRxMbps,
+    e.netTxMbps,
+    e.focusedApp,
+    e.focusedTitle,
+    e.focusedPid,
+    e.fanRpm,
+    e.fanSource,
+  );
+}
+
+function pruneOld(now: number) {
+  const cutoff = now - cfg.retentionDays * 24 * 60 * 60 * 1000;
+  db.run("DELETE FROM process_samples WHERE ts < ?", cutoff);
+  db.run("DELETE FROM process_samples_v2 WHERE ts < ?", cutoff);
+  db.run("DELETE FROM process_identities WHERE id NOT IN (SELECT DISTINCT process_id FROM process_samples_v2)");
+  db.run("DELETE FROM environment_samples WHERE ts < ?", cutoff);
+  db.run("DELETE FROM battery_samples WHERE ts < ?", cutoff);
+}
+
+const processRowsViewSql = `
+  SELECT sample_id,ts,pid,ppid,name,app,cmd,cpu_percent,cpu_seconds,io_mb,rss_mb,score,estimated_watts,is_self FROM process_samples
+  UNION ALL
+  SELECT s.sample_id,s.ts,s.pid,s.ppid,i.name,i.app,i.cmd,s.cpu_percent,s.cpu_seconds,s.io_mb,s.rss_mb,s.score,s.estimated_watts,s.is_self
+    FROM process_samples_v2 s JOIN process_identities i ON i.id = s.process_id
+`;
+
+function apiStatus() {
+  const latestBattery = db.query("SELECT id,ts,on_battery,status,capacity,energy_wh,power_w,source FROM battery_samples ORDER BY ts DESC LIMIT 1").get() as Record<string, unknown> | null;
+  const latestEnvironment = db.query("SELECT ts,theme,theme_detail,brightness_percent,brightness_source,audio_playing,audio_detail,video_streaming,video_detail,net_rx_mbps,net_tx_mbps,focused_app,focused_title,focused_pid,fan_rpm,fan_source FROM environment_samples ORDER BY ts DESC LIMIT 1").get() as Record<string, unknown> | null;
+  const selfLatest = db.query(`SELECT ts,pid,app,cpu_percent,io_mb,rss_mb,estimated_watts FROM (${processRowsViewSql}) WHERE is_self=1 ORDER BY ts DESC LIMIT 1`).get() as Record<string, unknown> | null;
+  const processRows = (db.query(`SELECT COUNT(*) AS n FROM (${processRowsViewSql})`).get() as { n: number }).n;
+  return { latestBattery, latestEnvironment, selfLatest, dischargeEstimate: computeBatteryRateEstimate(), processRows, config: { pollSeconds: cfg.pollMs / 1000, baselineMode: cfg.baselineMode, baselineWatts: cfg.baselineWatts, baselineMinWatts: cfg.baselineMinWatts, baselineMaxWatts: cfg.baselineMaxWatts } };
+}
+
+function computeBatteryRateEstimate() {
+  const latest = db.query("SELECT ts,on_battery,status,capacity FROM battery_samples WHERE capacity IS NOT NULL ORDER BY ts DESC LIMIT 1").get() as { ts: number; on_battery: number; status: string; capacity: number } | null;
+  if (!latest) return { mode: "unknown", percentPerHour: null, hoursRemaining: null, hoursToFull: null, detail: "no battery samples" };
+
+  const latestCharging = !latest.on_battery && latest.status.toLowerCase().includes("charging");
+  const mode = latest.on_battery ? "discharging" : latestCharging ? "charging" : "plugged";
+
+  for (const windowMinutes of [30, 120, 360]) {
+    const since = Date.now() - windowMinutes * 60 * 1000;
+    const rows = db.query("SELECT ts,on_battery,status,capacity FROM battery_samples WHERE capacity IS NOT NULL AND ts >= ? ORDER BY ts").all(since) as { ts: number; on_battery: number; status: string; capacity: number }[];
+    const matching = rows.filter((r) => mode === "discharging" ? Boolean(r.on_battery) : mode === "charging" ? (!r.on_battery && r.status.toLowerCase().includes("charging")) : !r.on_battery);
+    if (matching.length < 2) continue;
+    const first = matching[0];
+    const last = matching[matching.length - 1];
+    const hours = Math.max(1 / 60, (last.ts - first.ts) / 3600000);
+    const rawRate = (last.capacity - first.capacity) / hours;
+    const percentPerHour = mode === "discharging" ? -rawRate : rawRate;
+    if (percentPerHour <= 0) continue;
+    return {
+      mode,
+      percentPerHour,
+      hoursRemaining: mode === "discharging" ? latest.capacity / percentPerHour : null,
+      hoursToFull: mode === "charging" ? Math.max(0, 100 - latest.capacity) / percentPerHour : null,
+      detail: `${matching.length} samples over ${(hours * 60).toFixed(0)} min`,
+    };
+  }
+
+  return { mode, percentPerHour: null, hoursRemaining: null, hoursToFull: null, detail: mode === "charging" ? "estimating charge rate" : mode === "discharging" ? "estimating discharge rate" : "plugged" };
+}
+
+function apiSeries(url: URL) {
+  const hours = clamp(Number(url.searchParams.get("hours") ?? 8), 1, 24 * 30);
+  const top = clamp(Number(url.searchParams.get("top") ?? 12), 1, 50);
+  const since = Date.now() - hours * 60 * 60 * 1000;
+
+  const rawTopRows = db.query(`SELECT app, SUM(estimated_watts) AS total FROM (${processRowsViewSql}) WHERE ts >= ? GROUP BY app ORDER BY total DESC`).all(since) as { app: string; total: number }[];
+  const totals = new Map<string, number>();
+  for (const r of rawTopRows) {
+    const app = normalizeStoredApp(r.app);
+    totals.set(app, (totals.get(app) ?? 0) + r.total);
+  }
+  const apps = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, top).map(([app]) => app);
+  for (const must of ["battery-monitor", "System / baseline"]) {
+    if ((totals.get(must) ?? 0) > 0 && !apps.includes(must)) apps.push(must);
+  }
+
+  const batteryRows = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts >= ? ORDER BY ts").all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string }[];
+  const points = batteryRows.map((b, idx) => {
+    const prev = idx > 0 ? batteryRows[idx - 1] : null;
+    let batteryRatePctPerHour: number | null = null;
+    if (prev?.capacity != null && b.capacity != null) {
+      const hoursDelta = Math.max(1 / 3600, (b.ts - prev.ts) / 3600000);
+      batteryRatePctPerHour = (b.capacity - prev.capacity) / hoursDelta;
+    }
+    return {
+      sampleId: b.id,
+      ts: b.ts,
+      batteryPercent: b.capacity,
+      batteryRatePctPerHour,
+      totalWatts: b.power_w,
+      onBattery: Boolean(b.on_battery),
+      charging: !b.on_battery && b.status.toLowerCase().includes("charging"),
+      status: b.status,
+      apps: {} as Record<string, number>,
+    };
+  });
+  const bySample = new Map(points.map((p) => [p.sampleId, p]));
+  let otherTotal = 0;
+
+  const aggRows = db.query(`SELECT sample_id, app, SUM(estimated_watts) AS watts FROM (${processRowsViewSql}) WHERE ts >= ? GROUP BY sample_id, app ORDER BY sample_id`).all(since) as { sample_id: number; app: string; watts: number }[];
+  for (const r of aggRows) {
+    const p = bySample.get(r.sample_id);
+    if (!p) continue;
+    const app = normalizeStoredApp(r.app);
+    if (apps.includes(app)) p.apps[app] = (p.apps[app] ?? 0) + r.watts;
+    else { p.apps.Other = (p.apps.Other ?? 0) + r.watts; otherTotal += r.watts; }
+  }
+  const finalApps = otherTotal > 0 ? apps.concat("Other") : apps;
+  return { apps: finalApps, points };
+}
+
+function normalizeStoredApp(app: string): string {
+  if (["zen-bin", "Isolated Web Co", "Isolated Servic", "Web Content", "WebExtensions", "Socket Process", "Privileged Cont", "forkserver"].includes(app)) return "Zen Browser";
+  if (["containerd", "containerd-shim", "dockerd", "docker", "runc", "docker-proxy"].includes(app)) return "Docker";
+  if (app.startsWith("kworker")) return "Kernel workers";
+  return app;
+}
+
+function apiGroups(url: URL) {
+  const hours = clamp(Number(url.searchParams.get("hours") ?? 8), 1, 24 * 30);
+  const since = Date.now() - hours * 60 * 60 * 1000;
+  const sampleCount = (db.query(`SELECT COUNT(DISTINCT sample_id) AS n FROM (${processRowsViewSql}) WHERE ts >= ?`).get(since) as { n: number }).n || 1;
+  const sampledHours = sampleCount * (cfg.pollMs / 1000) / 3600;
+  const rows = db.query(`SELECT app,name,cmd,SUM(estimated_watts) AS watts,SUM(cpu_seconds) AS cpu_seconds,SUM(io_mb) AS io_mb,AVG(rss_mb) AS rss_mb,COUNT(*) AS rows,COUNT(DISTINCT sample_id) AS samples
+    FROM (${processRowsViewSql}) WHERE ts >= ? GROUP BY app,name,cmd`).all(since) as {
+      app: string; name: string; cmd: string; watts: number; cpu_seconds: number; io_mb: number; rss_mb: number; rows: number; samples: number;
+    }[];
+
+  type Child = { name: string; cmd: string; wattSamples: number; avgWatts: number; wh: number; cpuSeconds: number; ioMb: number; rssMb: number; rows: number; samples: number };
+  const groups = new Map<string, { app: string; wattSamples: number; avgWatts: number; wh: number; cpuSeconds: number; ioMb: number; rssMbSum: number; rssRows: number; rows: number; samples: Set<number>; children: Map<string, Child> }>();
+
+  for (const r of rows) {
+    const app = normalizeStoredApp(r.app);
+    let group = groups.get(app);
+    if (!group) {
+      group = { app, wattSamples: 0, avgWatts: 0, wh: 0, cpuSeconds: 0, ioMb: 0, rssMbSum: 0, rssRows: 0, rows: 0, samples: new Set(), children: new Map() };
+      groups.set(app, group);
+    }
+
+    const childKey = subprocessLabel(r.name, r.cmd);
+    let child = group.children.get(childKey);
+    if (!child) {
+      child = { name: childKey, cmd: r.cmd, wattSamples: 0, avgWatts: 0, wh: 0, cpuSeconds: 0, ioMb: 0, rssMb: 0, rows: 0, samples: 0 };
+      group.children.set(childKey, child);
+    }
+
+    group.wattSamples += r.watts;
+    group.cpuSeconds += r.cpu_seconds;
+    group.ioMb += r.io_mb;
+    group.rssMbSum += r.rss_mb * r.rows;
+    group.rssRows += r.rows;
+    group.rows += r.rows;
+    // Approximate distinct group samples from child sample counts. Good enough for UI presence.
+    for (let i = 0; i < r.samples; i++) group.samples.add(group.samples.size + i);
+
+    child.wattSamples += r.watts;
+    child.cpuSeconds += r.cpu_seconds;
+    child.ioMb += r.io_mb;
+    child.rssMb = ((child.rssMb * child.rows) + (r.rss_mb * r.rows)) / Math.max(1, child.rows + r.rows);
+    child.rows += r.rows;
+    child.samples += r.samples;
+  }
+
+  const output = [...groups.values()].map((g) => {
+    const children = [...g.children.values()]
+      .map((c) => ({ ...c, avgWatts: c.wattSamples / sampleCount, wh: (c.wattSamples / sampleCount) * sampledHours }))
+      .sort((a, b) => b.wattSamples - a.wattSamples);
+    const avgWatts = g.wattSamples / sampleCount;
+    return {
+      app: g.app,
+      wattSamples: g.wattSamples,
+      avgWatts,
+      wh: avgWatts * sampledHours,
+      cpuSeconds: g.cpuSeconds,
+      ioMb: g.ioMb,
+      rssMb: g.rssRows ? g.rssMbSum / g.rssRows : 0,
+      rows: g.rows,
+      children,
+    };
+  }).sort((a, b) => b.wattSamples - a.wattSamples);
+
+  return { hours, sampleCount, sampledHours, groups: output };
+}
+
+function subprocessLabel(name: string, cmd: string): string {
+  if (name === "system-baseline") return "System / baseline";
+  if (!cmd || cmd === name) return name;
+  if (name.startsWith("Isolated") || name.includes("Web") || name.includes("Socket") || name.includes("Privileged")) return name;
+  const lower = cmd.toLowerCase();
+  if (lower.includes("-contentproc")) {
+    if (lower.includes(" socket")) return "Socket Process";
+    if (lower.includes(" rdd")) return "RDD Process";
+    if (lower.includes(" utility")) return "Utility Process";
+    if (lower.includes("-isforbrowser")) return "Web Content";
+    return "Content process";
+  }
+  const first = firstWord(cmd);
+  return first || name;
+}
+
+function apiProcesses(url: URL) {
+  const requested = url.searchParams.get("sample_id");
+  const sampleId = requested ? Number(requested) : ((db.query(`SELECT sample_id FROM (${processRowsViewSql}) ORDER BY ts DESC LIMIT 1`).get() as { sample_id: number } | null)?.sample_id ?? null);
+  if (!sampleId) return { sampleId: null, rows: [] };
+  const rows = db.query(`SELECT ts,pid,ppid,name,app,cmd,cpu_percent,cpu_seconds,io_mb,rss_mb,score,estimated_watts,is_self
+    FROM (${processRowsViewSql}) WHERE sample_id = ? ORDER BY estimated_watts DESC LIMIT 200`).all(sampleId) as Record<string, unknown>[];
+  return { sampleId, rows };
+}
+
+function readEnergyWh(dir: string, kind: "now" | "full"): number | null {
+  const energy = readNum(path.join(dir, `energy_${kind}`));
+  if (energy != null) return energy / 1_000_000;
+  const charge = readNum(path.join(dir, `charge_${kind}`));
+  const voltage = readNum(path.join(dir, "voltage_now"));
+  if (charge != null && voltage != null) return (charge * voltage) / 1_000_000_000_000;
+  return null;
+}
+
+function readPowerW(dir: string): number | null {
+  const power = readNum(path.join(dir, "power_now"));
+  if (power != null) return Math.abs(power) / 1_000_000;
+  const current = readNum(path.join(dir, "current_now"));
+  const voltage = readNum(path.join(dir, "voltage_now"));
+  if (current != null && voltage != null) return Math.abs(current * voltage) / 1_000_000_000_000;
+  return null;
+}
+
+function safeReaddir(dir: string): string[] {
+  try { return readdirSync(dir); } catch { return []; }
+}
+
+function safeReadTrim(file: string): string {
+  try { return readFileSync(file, "utf8").trim(); } catch { return ""; }
+}
+
+function readNum(file: string): number | null {
+  const text = safeReadTrim(file);
+  if (!text) return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
+function firstWord(s: string) {
+  return s.trim().split(/\s+/)[0]?.split("/").pop() ?? "";
+}
+
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+}
+
+function env(name: string, fallback: string) {
+  return process.env[name] || fallback;
+}
+function intEnv(name: string, fallback: number) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+function numEnv(name: string, fallback: number) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) ? n : fallback;
+}
+function boolEnv(name: string, fallback: boolean) {
+  const v = process.env[name];
+  if (v == null) return fallback;
+  return ["1", "true", "yes", "on"].includes(v.toLowerCase());
+}
+function clamp(n: number, min: number, max: number) {
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+function fmtW(w: number | null | undefined) { return w == null ? "?W" : `${w.toFixed(2)}W`; }
+function fmtPct(p: number | null | undefined) { return p == null ? "?%" : `${p.toFixed(1)}%`; }
+
+console.log(`[battery-monitor] db=${dbPath}`);
+console.log(`[battery-monitor] polling every ${cfg.pollMs / 1000}s; proc=${cfg.procRoot}; power=${cfg.powerRoot}; self pid=${selfPid}`);
+
+await pollOnce().catch((err) => console.error("[battery-monitor] first poll failed", err));
+setInterval(() => pollOnce().catch((err) => console.error("[battery-monitor] poll failed", err)), cfg.pollMs).unref?.();
+
+Bun.serve({
+  hostname: cfg.host,
+  port: cfg.port,
+  fetch(req) {
+    const url = new URL(req.url);
+    try {
+      if (url.pathname === "/") return new Response(indexHtml, { headers: { "content-type": "text/html; charset=utf-8" } });
+      if (url.pathname === "/api/status") return json(apiStatus());
+      if (url.pathname === "/api/series") return json(apiSeries(url));
+      if (url.pathname === "/api/groups") return json(apiGroups(url));
+      if (url.pathname === "/api/processes") return json(apiProcesses(url));
+      if (url.pathname === "/healthz") return new Response("ok\n");
+      return new Response("not found\n", { status: 404 });
+    } catch (err) {
+      console.error("[battery-monitor] request failed", err);
+      return json({ error: String(err instanceof Error ? err.message : err) }, 500);
+    }
+  },
+});
+console.log(`[battery-monitor] UI: http://${cfg.host}:${cfg.port}`);

@@ -1,0 +1,15 @@
+{
+  "name": "battery-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Low-overhead laptop battery/process drain monitor with a local Bun UI.",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --watch src/main.ts",
+    "check": "bun build src/main.ts --target=bun --outfile=/tmp/battery-monitor-check.js"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

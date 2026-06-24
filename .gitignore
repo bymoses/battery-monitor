@@ -1,0 +1,21 @@
+# runtime data
+/data/*
+!/data/.gitkeep
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+*.pid
+focused-window.json
+
+# deps/build
+node_modules/
+dist/
+.tmp/
+.cache/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
