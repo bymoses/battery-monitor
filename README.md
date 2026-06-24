@@ -67,6 +67,20 @@ cd /home/user/workspace/bms/devices/battery-monitor
 
 It writes `data/focused-window.json`; the Docker service imports it on the next 30s poll.
 
+To auto-start it on login, install the user systemd service:
+
+```bash
+./scripts/install-focused-window-service.sh
+```
+
+Useful commands:
+
+```bash
+systemctl --user status battery-monitor-focused-window.service
+systemctl --user restart battery-monitor-focused-window.service
+systemctl --user disable --now battery-monitor-focused-window.service
+```
+
 ## Data
 
 SQLite database is stored at:
