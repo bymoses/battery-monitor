@@ -98,6 +98,7 @@ const fmtDuration = h => h == null ? '—' : (h >= 24 ? (h / 24).toFixed(1) + 'd
 let series = null;
 let groupsData = null;
 let hoverIndex = null;
+let hoverTs = null;
 const expandedGroups = new Set();
 
 async function refresh() {
@@ -281,8 +282,8 @@ function drawRateChart() {
 }
 
 function drawHoverLine(ctx, pts, x, y1, y2) {
-  if (hoverIndex == null || !pts[hoverIndex]) return;
-  const xx = x(pts[hoverIndex].ts);
+  if (hoverTs == null) return;
+  const xx = x(hoverTs);
   ctx.beginPath(); ctx.moveTo(xx, y1); ctx.lineTo(xx, y2); ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
 }
 
@@ -332,9 +333,21 @@ function drawSleepBands(ctx, x, y1, y2) {
   ctx.restore();
 }
 
-function sleepEventForPoint(p) {
-  if (!p?.gapBefore) return null;
-  return timelineGapEvents().find(e => Math.abs(Number(e.end_ts) - p.ts) < 2000) || null;
+function sleepEventForTs(ts) {
+  if (ts == null) return null;
+  return timelineGapEvents().find(e => ts >= Number(e.start_ts) && ts <= Number(e.end_ts)) || null;
+}
+
+function nearestPointIndexByTime(ts) {
+  const pts = series?.points || [];
+  if (!pts.length) return 0;
+  let lo = 0, hi = pts.length - 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (pts[mid].ts < ts) lo = mid + 1; else hi = mid;
+  }
+  if (lo > 0 && Math.abs(pts[lo - 1].ts - ts) < Math.abs(pts[lo].ts - ts)) return lo - 1;
+  return lo;
 }
 
 const tip = document.getElementById('tip');
@@ -343,12 +356,16 @@ function handleTimelineHover(ev) {
   const rect = ev.target.getBoundingClientRect();
   const padL = 52, padR = 46;
   const rel = Math.max(0, Math.min(1, (ev.clientX - rect.left - padL) / Math.max(1, rect.width - padL - padR)));
-  const idx = Math.max(0, Math.min(series.points.length - 1, Math.round(rel * (series.points.length - 1))));
+  const pts = series.points;
+  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
+  hoverTs = t0 + rel * Math.max(1, t1 - t0);
+  const idx = nearestPointIndexByTime(hoverTs);
   hoverIndex = idx;
-  const p = series.points[idx];
+  const p = pts[idx];
+  const sleep = sleepEventForTs(hoverTs);
   const apps = series.apps || [];
   let hovered = null;
-  if (ev.target.id === 'chart') {
+  if (ev.target.id === 'chart' && !sleep) {
     const sums = series.points.map(point => apps.reduce((s,a)=>s+(point.apps[a]||0),0));
     const maxY = Math.max(1, ...sums) * 1.15;
     const padT = 18, padB = 34;
@@ -361,17 +378,18 @@ function handleTimelineHover(ev) {
     }
   }
   draw();
-  const lines = apps.map(a => [a, p.apps[a] || 0]).filter(x=>x[1]>0.005).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  const lines = sleep ? [] : apps.map(a => [a, p.apps[a] || 0]).filter(x=>x[1]>0.005).sort((a,b)=>b[1]-a[1]).slice(0,10);
   tip.style.display='block'; tip.style.left=(ev.clientX+14)+'px'; tip.style.top=(ev.clientY+14)+'px';
   const rate = p.batteryRatePctPerHour;
   const rateText = typeof rate === 'number' && isFinite(rate) ? ' / rate ' + (rate >= 0 ? '+' : '') + rate.toFixed(2) + '%/h' : '';
-  const sleep = sleepEventForPoint(p);
   const sleepText = sleep ? '<br><b style="color:#fbbf24">'+escapeHtml(sleep.kind || 'sleep gap')+': '+fmtDuration(Number(sleep.duration_sec)/3600)+', avg '+(sleep.avg_power_w == null ? '?' : Math.abs(Number(sleep.avg_power_w)).toFixed(2)+'W')+', '+(sleep.avg_percent_per_hour == null ? '?' : Number(sleep.avg_percent_per_hour).toFixed(2)+'%/h')+'</b>' : '';
-  tip.innerHTML = '<b>'+new Date(p.ts).toLocaleString()+'</b><br>battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + sleepText +
+  tip.innerHTML = '<b>'+new Date(hoverTs).toLocaleString()+'</b><br>' +
+    (sleep ? 'no process samples during sleep/gap<br>nearest battery sample: ' : '') +
+    'battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + sleepText +
     (hovered ? '<br><b style="color:#fbbf24">hover: '+escapeHtml(hovered)+'</b>' : '') + '<br>' +
-    lines.map(([a,v]) => (a === hovered ? '<b style="color:#fbbf24">▸ '+escapeHtml(a)+': '+fmtW(v)+'</b>' : escapeHtml(a)+': '+fmtW(v))).join('<br>');
+    (lines.length ? lines.map(([a,v]) => (a === hovered ? '<b style="color:#fbbf24">▸ '+escapeHtml(a)+': '+fmtW(v)+'</b>' : escapeHtml(a)+': '+fmtW(v))).join('<br>') : '<span class="muted">gap interval</span>');
 }
-function clearTimelineHover() { hoverIndex = null; tip.style.display='none'; draw(); }
+function clearTimelineHover() { hoverIndex = null; hoverTs = null; tip.style.display='none'; draw(); }
 for (const id of ['chart', 'rateChart']) {
   document.getElementById(id).addEventListener('mousemove', handleTimelineHover);
   document.getElementById(id).addEventListener('mouseleave', clearTimelineHover);
