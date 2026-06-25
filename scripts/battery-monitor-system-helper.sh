@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FOCUSED_OUT="${FOCUSED_WINDOW_FILE:-$ROOT/data/focused-window.json}"
 DESKTOP_OUT="${DESKTOP_STATE_FILE:-$ROOT/data/desktop-state.json}"
-INTERVAL="${BATTERY_MONITOR_SESSION_INTERVAL_SECONDS:-${FOCUSED_WINDOW_INTERVAL_SECONDS:-5}}"
+INTERVAL="${BATTERY_MONITOR_SESSION_INTERVAL_SECONDS:-5}"
 
 mkdir -p "$(dirname "$FOCUSED_OUT")" "$(dirname "$DESKTOP_OUT")"
 
