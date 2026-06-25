@@ -98,6 +98,8 @@ Tables:
 - `process_identities` process/app/cmd text stored once
 - `process_samples_v2` compact per-sample numeric process rows
 - `sample_app_totals` pre-aggregated app watts per sample for fast timeline queries
+- `sample_process_totals` pre-aggregated process identity totals per sample
+- `sample_group_totals` pre-aggregated expandable group/subprocess totals for faster Groups view
 - `environment_samples`
 - `sleep_events` suspend/sample gap intervals with average sleep charge/discharge rate
 

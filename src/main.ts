@@ -732,6 +732,35 @@ function initDb() {
     watts REAL NOT NULL,
     UNIQUE(sample_id, app)
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS sample_process_totals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    process_id INTEGER NOT NULL,
+    watts REAL NOT NULL,
+    cpu_seconds REAL NOT NULL,
+    io_mb REAL NOT NULL,
+    rss_mb_sum REAL NOT NULL,
+    rss_rows INTEGER NOT NULL,
+    row_count INTEGER NOT NULL,
+    UNIQUE(sample_id, process_id),
+    FOREIGN KEY(process_id) REFERENCES process_identities(id)
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS sample_group_totals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    app TEXT NOT NULL,
+    child_name TEXT NOT NULL,
+    cmd TEXT NOT NULL,
+    watts REAL NOT NULL,
+    cpu_seconds REAL NOT NULL,
+    io_mb REAL NOT NULL,
+    rss_mb_sum REAL NOT NULL,
+    rss_rows INTEGER NOT NULL,
+    row_count INTEGER NOT NULL,
+    UNIQUE(sample_id, app, child_name)
+  )`);
   db.run(`CREATE TABLE IF NOT EXISTS environment_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sample_id INTEGER NOT NULL,
@@ -765,6 +794,13 @@ function initDb() {
   db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_identity ON process_samples_v2(process_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_sample_app_totals_ts_app ON sample_app_totals(ts, app)");
   db.run("CREATE INDEX IF NOT EXISTS idx_sample_app_totals_sample ON sample_app_totals(sample_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_process_totals_ts ON sample_process_totals(ts)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_process_totals_sample ON sample_process_totals(sample_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_process_totals_identity ON sample_process_totals(process_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_group_totals_ts ON sample_group_totals(ts)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_group_totals_sample ON sample_group_totals(sample_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_group_totals_app_child ON sample_group_totals(app, child_name)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_group_totals_ts_app_child ON sample_group_totals(ts, app, child_name)");
   db.run("CREATE INDEX IF NOT EXISTS idx_sleep_events_time ON sleep_events(start_ts, end_ts)");
   db.run("CREATE INDEX IF NOT EXISTS idx_environment_ts ON environment_samples(ts)");
 }
@@ -816,14 +852,50 @@ const insertRowsTx = db.transaction((sampleId: number, ts: number, rows: ProcRow
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
   const totalInsert = db.prepare(`INSERT INTO sample_app_totals (sample_id,ts,app,watts) VALUES (?,?,?,?)
     ON CONFLICT(sample_id, app) DO UPDATE SET watts=excluded.watts, ts=excluded.ts`);
+  const procTotalInsert = db.prepare(`INSERT INTO sample_process_totals
+    (sample_id,ts,process_id,watts,cpu_seconds,io_mb,rss_mb_sum,rss_rows,row_count)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(sample_id, process_id) DO UPDATE SET
+      watts=excluded.watts, cpu_seconds=excluded.cpu_seconds, io_mb=excluded.io_mb,
+      rss_mb_sum=excluded.rss_mb_sum, rss_rows=excluded.rss_rows, row_count=excluded.row_count, ts=excluded.ts`);
+  const groupTotalInsert = db.prepare(`INSERT INTO sample_group_totals
+    (sample_id,ts,app,child_name,cmd,watts,cpu_seconds,io_mb,rss_mb_sum,rss_rows,row_count)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(sample_id, app, child_name) DO UPDATE SET
+      cmd=excluded.cmd, watts=excluded.watts, cpu_seconds=excluded.cpu_seconds, io_mb=excluded.io_mb,
+      rss_mb_sum=excluded.rss_mb_sum, rss_rows=excluded.rss_rows, row_count=excluded.row_count, ts=excluded.ts`);
   const appTotals = new Map<string, number>();
+  const procTotals = new Map<number, { watts: number; cpuSeconds: number; ioMb: number; rssMbSum: number; rssRows: number; rowCount: number }>();
+  const groupTotals = new Map<string, { app: string; childName: string; cmd: string; watts: number; cpuSeconds: number; ioMb: number; rssMbSum: number; rssRows: number; rowCount: number }>();
   for (const r of rows) {
     identityInsert.run(r.app, r.name, r.cmd);
     const identity = identitySelect.get(r.app, r.name, r.cmd) as { id: number };
     sampleInsert.run(sampleId, ts, r.pid, r.ppid, identity.id, r.cpuPercent, r.cpuSeconds, r.ioMb, r.rssMb, r.score, r.estimatedWatts, r.isSelf ? 1 : 0);
     appTotals.set(r.app, (appTotals.get(r.app) ?? 0) + r.estimatedWatts);
+    const procTotal = procTotals.get(identity.id) ?? { watts: 0, cpuSeconds: 0, ioMb: 0, rssMbSum: 0, rssRows: 0, rowCount: 0 };
+    procTotal.watts += r.estimatedWatts;
+    procTotal.cpuSeconds += r.cpuSeconds;
+    procTotal.ioMb += r.ioMb;
+    procTotal.rssMbSum += r.rssMb;
+    procTotal.rssRows += 1;
+    procTotal.rowCount += 1;
+    procTotals.set(identity.id, procTotal);
+
+    const childName = subprocessLabel(r.name, r.cmd);
+    const groupKey = `${r.app}\u0000${childName}`;
+    const groupTotal = groupTotals.get(groupKey) ?? { app: r.app, childName, cmd: r.cmd, watts: 0, cpuSeconds: 0, ioMb: 0, rssMbSum: 0, rssRows: 0, rowCount: 0 };
+    groupTotal.watts += r.estimatedWatts;
+    groupTotal.cpuSeconds += r.cpuSeconds;
+    groupTotal.ioMb += r.ioMb;
+    groupTotal.rssMbSum += r.rssMb;
+    groupTotal.rssRows += 1;
+    groupTotal.rowCount += 1;
+    if (!groupTotal.cmd && r.cmd) groupTotal.cmd = r.cmd;
+    groupTotals.set(groupKey, groupTotal);
   }
   for (const [app, watts] of appTotals) totalInsert.run(sampleId, ts, app, watts);
+  for (const [processId, t] of procTotals) procTotalInsert.run(sampleId, ts, processId, t.watts, t.cpuSeconds, t.ioMb, t.rssMbSum, t.rssRows, t.rowCount);
+  for (const t of groupTotals.values()) groupTotalInsert.run(sampleId, ts, t.app, t.childName, t.cmd, t.watts, t.cpuSeconds, t.ioMb, t.rssMbSum, t.rssRows, t.rowCount);
 });
 
 function insertProcessRows(sampleId: number, ts: number, rows: ProcRow[]) {
@@ -834,12 +906,46 @@ function backfillSampleAppTotals() {
   const existing = (db.query("SELECT COUNT(*) AS n FROM sample_app_totals").get() as { n: number }).n;
   const legacyRows = (db.query("SELECT COUNT(*) AS n FROM process_samples").get() as { n: number }).n;
   const v2Rows = (db.query("SELECT COUNT(*) AS n FROM process_samples_v2").get() as { n: number }).n;
+  if (existing === 0 && legacyRows + v2Rows > 0) {
+    console.log("[battery-monitor] backfilling sample_app_totals from process samples");
+    db.run(`INSERT OR IGNORE INTO sample_app_totals (sample_id,ts,app,watts)
+      SELECT sample_id, MIN(ts) AS ts, app, SUM(estimated_watts) AS watts
+      FROM (${processRowsViewSql})
+      GROUP BY sample_id, app`);
+  }
+}
+
+function backfillSampleProcessTotals() {
+  const existing = (db.query("SELECT COUNT(*) AS n FROM sample_process_totals").get() as { n: number }).n;
+  const legacyRows = (db.query("SELECT COUNT(*) AS n FROM process_samples").get() as { n: number }).n;
+  const v2Rows = (db.query("SELECT COUNT(*) AS n FROM process_samples_v2").get() as { n: number }).n;
   if (existing > 0 || legacyRows + v2Rows === 0) return;
-  console.log("[battery-monitor] backfilling sample_app_totals from process samples");
-  db.run(`INSERT OR IGNORE INTO sample_app_totals (sample_id,ts,app,watts)
-    SELECT sample_id, MIN(ts) AS ts, app, SUM(estimated_watts) AS watts
+  console.log("[battery-monitor] backfilling sample_process_totals from process samples");
+  db.run("INSERT OR IGNORE INTO process_identities (app,name,cmd) SELECT DISTINCT app,name,cmd FROM process_samples");
+  db.run(`INSERT OR IGNORE INTO sample_process_totals (sample_id,ts,process_id,watts,cpu_seconds,io_mb,rss_mb_sum,rss_rows,row_count)
+    SELECT p.sample_id, MIN(p.ts) AS ts, i.id AS process_id, SUM(p.estimated_watts), SUM(p.cpu_seconds), SUM(p.io_mb), SUM(p.rss_mb), COUNT(*), COUNT(*)
+    FROM process_samples p JOIN process_identities i ON i.app=p.app AND i.name=p.name AND i.cmd=p.cmd
+    GROUP BY p.sample_id, i.id`);
+  db.run(`INSERT OR IGNORE INTO sample_process_totals (sample_id,ts,process_id,watts,cpu_seconds,io_mb,rss_mb_sum,rss_rows,row_count)
+    SELECT sample_id, MIN(ts) AS ts, process_id, SUM(estimated_watts), SUM(cpu_seconds), SUM(io_mb), SUM(rss_mb), COUNT(*), COUNT(*)
+    FROM process_samples_v2
+    GROUP BY sample_id, process_id`);
+}
+
+function backfillSampleGroupTotals() {
+  const existing = (db.query("SELECT COUNT(*) AS n FROM sample_group_totals").get() as { n: number }).n;
+  const legacyRows = (db.query("SELECT COUNT(*) AS n FROM process_samples").get() as { n: number }).n;
+  const v2Rows = (db.query("SELECT COUNT(*) AS n FROM process_samples_v2").get() as { n: number }).n;
+  if (existing > 0 || legacyRows + v2Rows === 0) return;
+  console.log("[battery-monitor] backfilling sample_group_totals from process samples");
+  // SQL-only backfill groups by kernel/browser process name. New samples use the
+  // richer subprocessLabel() rollup, but this keeps startup fast for existing DBs.
+  db.run(`INSERT OR IGNORE INTO sample_group_totals
+    (sample_id,ts,app,child_name,cmd,watts,cpu_seconds,io_mb,rss_mb_sum,rss_rows,row_count)
+    SELECT sample_id, MIN(ts) AS ts, app, name AS child_name, MIN(cmd) AS cmd,
+      SUM(estimated_watts), SUM(cpu_seconds), SUM(io_mb), SUM(rss_mb), COUNT(*), COUNT(*)
     FROM (${processRowsViewSql})
-    GROUP BY sample_id, app`);
+    GROUP BY sample_id, app, name`);
 }
 
 function insertEnvironment(e: EnvironmentSample) {
@@ -871,7 +977,9 @@ function pruneOld(now: number) {
   db.run("DELETE FROM process_samples WHERE ts < ?", cutoff);
   db.run("DELETE FROM process_samples_v2 WHERE ts < ?", cutoff);
   db.run("DELETE FROM sample_app_totals WHERE ts < ?", cutoff);
-  db.run("DELETE FROM process_identities WHERE id NOT IN (SELECT DISTINCT process_id FROM process_samples_v2)");
+  db.run("DELETE FROM sample_process_totals WHERE ts < ?", cutoff);
+  db.run("DELETE FROM sample_group_totals WHERE ts < ?", cutoff);
+  db.run("DELETE FROM process_identities WHERE id NOT IN (SELECT DISTINCT process_id FROM process_samples_v2 UNION SELECT DISTINCT process_id FROM sample_process_totals)");
   db.run("DELETE FROM sleep_events WHERE end_ts < ?", cutoff);
   db.run("DELETE FROM environment_samples WHERE ts < ?", cutoff);
   db.run("DELETE FROM battery_samples WHERE ts < ?", cutoff);
@@ -1003,11 +1111,12 @@ function normalizeStoredApp(app: string): string {
 function apiGroups(url: URL) {
   const hours = clamp(Number(url.searchParams.get("hours") ?? 8), 1, 24 * 30);
   const since = Date.now() - hours * 60 * 60 * 1000;
-  const sampleCount = (db.query(`SELECT COUNT(DISTINCT sample_id) AS n FROM (${processRowsViewSql}) WHERE ts >= ?`).get(since) as { n: number }).n || 1;
+  const sampleCount = (db.query("SELECT COUNT(DISTINCT sample_id) AS n FROM sample_group_totals WHERE ts >= ?").get(since) as { n: number }).n || 1;
   const sampledHours = sampleCount * (cfg.pollMs / 1000) / 3600;
-  const rows = db.query(`SELECT app,name,cmd,SUM(estimated_watts) AS watts,SUM(cpu_seconds) AS cpu_seconds,SUM(io_mb) AS io_mb,AVG(rss_mb) AS rss_mb,COUNT(*) AS rows,COUNT(DISTINCT sample_id) AS samples
-    FROM (${processRowsViewSql}) WHERE ts >= ? GROUP BY app,name,cmd`).all(since) as {
-      app: string; name: string; cmd: string; watts: number; cpu_seconds: number; io_mb: number; rss_mb: number; rows: number; samples: number;
+  const rows = db.query(`SELECT app,child_name AS name,MIN(cmd) AS cmd,SUM(watts) AS watts,SUM(cpu_seconds) AS cpu_seconds,SUM(io_mb) AS io_mb,
+      SUM(rss_mb_sum) AS rss_mb_sum,SUM(rss_rows) AS rss_rows,SUM(row_count) AS rows,COUNT(DISTINCT sample_id) AS samples
+    FROM sample_group_totals WHERE ts >= ? GROUP BY app,child_name`).all(since) as {
+      app: string; name: string; cmd: string; watts: number; cpu_seconds: number; io_mb: number; rss_mb_sum: number; rss_rows: number; rows: number; samples: number;
     }[];
 
   type Child = { name: string; cmd: string; wattSamples: number; avgWatts: number; wh: number; cpuSeconds: number; ioMb: number; rssMb: number; rows: number; samples: number };
@@ -1021,7 +1130,7 @@ function apiGroups(url: URL) {
       groups.set(app, group);
     }
 
-    const childKey = subprocessLabel(r.name, r.cmd);
+    const childKey = r.name;
     let child = group.children.get(childKey);
     if (!child) {
       child = { name: childKey, cmd: r.cmd, wattSamples: 0, avgWatts: 0, wh: 0, cpuSeconds: 0, ioMb: 0, rssMb: 0, rows: 0, samples: 0 };
@@ -1031,8 +1140,8 @@ function apiGroups(url: URL) {
     group.wattSamples += r.watts;
     group.cpuSeconds += r.cpu_seconds;
     group.ioMb += r.io_mb;
-    group.rssMbSum += r.rss_mb * r.rows;
-    group.rssRows += r.rows;
+    group.rssMbSum += r.rss_mb_sum;
+    group.rssRows += r.rss_rows;
     group.rows += r.rows;
     // Approximate distinct group samples from child sample counts. Good enough for UI presence.
     for (let i = 0; i < r.samples; i++) group.samples.add(group.samples.size + i);
@@ -1040,7 +1149,7 @@ function apiGroups(url: URL) {
     child.wattSamples += r.watts;
     child.cpuSeconds += r.cpu_seconds;
     child.ioMb += r.io_mb;
-    child.rssMb = ((child.rssMb * child.rows) + (r.rss_mb * r.rows)) / Math.max(1, child.rows + r.rows);
+    child.rssMb = ((child.rssMb * child.rows) + r.rss_mb_sum) / Math.max(1, child.rows + r.rows);
     child.rows += r.rows;
     child.samples += r.samples;
   }
@@ -1172,6 +1281,8 @@ function fmtW(w: number | null | undefined) { return w == null ? "?W" : `${w.toF
 function fmtPct(p: number | null | undefined) { return p == null ? "?%" : `${p.toFixed(1)}%`; }
 
 backfillSampleAppTotals();
+backfillSampleProcessTotals();
+backfillSampleGroupTotals();
 
 console.log(`[battery-monitor] db=${dbPath}`);
 console.log(`[battery-monitor] polling every ${cfg.pollMs / 1000}s; proc=${cfg.procRoot}; power=${cfg.powerRoot}; self pid=${selfPid}`);
