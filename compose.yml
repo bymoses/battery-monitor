@@ -27,6 +27,8 @@ services:
       BASELINE_LOOKBACK_HOURS: "24"
       HOST_CONFIG_DIR: "/host/config"
       FOCUSED_WINDOW_FILE: "/data/focused-window.json"
+      # Any interval longer than this is treated as suspend/sample gap.
+      SUSPEND_GAP_SECONDS: "120"
       VIDEO_RX_MBPS_THRESHOLD: "1"
       # 0 = keep every active process; raise if your machine has huge process counts.
       MAX_PROCESSES_PER_SAMPLE: "0"

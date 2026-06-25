@@ -81,6 +81,7 @@ const cfg = {
   baselineLookbackHours: numEnv("BASELINE_LOOKBACK_HOURS", 24),
   hostConfigDir: env("HOST_CONFIG_DIR", "/host/config"),
   focusedWindowFile: env("FOCUSED_WINDOW_FILE", "/data/focused-window.json"),
+  suspendGapMs: intEnv("SUSPEND_GAP_SECONDS", 120) * 1000,
   videoRxMbpsThreshold: numEnv("VIDEO_RX_MBPS_THRESHOLD", 1),
   maxProcessesPerSample: intEnv("MAX_PROCESSES_PER_SAMPLE", 0),
   clkTck: intEnv("CLK_TCK", 100),
@@ -99,13 +100,14 @@ const selfPid = process.pid;
 let prevTotalJiffies: number | null = null;
 let prevPollTs: number | null = null;
 let prevProcs = new Map<number, ProcPrev>();
-let prevBattery: BatterySample | null = null;
+let prevBattery: BatterySample | null = loadLatestBatteryFromDb();
 let prevNet: { ts: number; rxBytes: number; txBytes: number } | null = null;
 let lastRetentionAt = 0;
 
 async function pollOnce() {
   const ts = Date.now();
   const battery = readBattery(ts);
+  recordSleepGapIfNeeded(prevBattery, battery);
   const sampleId = insertBattery(battery);
   const shouldCollectProcesses = battery.onBattery || cfg.recordWhenPlugged || cfg.forceCollect;
 
@@ -135,6 +137,39 @@ async function pollOnce() {
     pruneOld(ts);
     lastRetentionAt = ts;
   }
+}
+
+function recordSleepGapIfNeeded(prev: BatterySample | null, current: BatterySample) {
+  if (!prev) return;
+  const durationMs = current.ts - prev.ts;
+  if (durationMs < cfg.suspendGapMs) return;
+  const durationSec = durationMs / 1000;
+  const durationHours = durationMs / 3600000;
+  const capacityDelta = current.capacity != null && prev.capacity != null ? current.capacity - prev.capacity : null;
+  const energyDeltaWh = current.energyWh != null && prev.energyWh != null ? current.energyWh - prev.energyWh : null;
+  const avgPowerW = energyDeltaWh != null ? energyDeltaWh / durationHours : null;
+  const avgPercentPerHour = capacityDelta != null ? capacityDelta / durationHours : null;
+  const kind = (energyDeltaWh ?? capacityDelta ?? 0) > 0 ? "suspend charge" : (energyDeltaWh ?? capacityDelta ?? 0) < 0 ? "suspend discharge" : "sample gap";
+
+  const existing = db.query("SELECT 1 FROM sleep_events WHERE start_ts=? AND end_ts=? LIMIT 1").get(prev.ts, current.ts);
+  if (existing) return;
+  db.run(`INSERT INTO sleep_events
+    (start_ts,end_ts,duration_sec,kind,start_capacity,end_capacity,capacity_delta,start_energy_wh,end_energy_wh,energy_delta_wh,avg_power_w,avg_percent_per_hour)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    prev.ts,
+    current.ts,
+    durationSec,
+    kind,
+    prev.capacity,
+    current.capacity,
+    capacityDelta,
+    prev.energyWh,
+    current.energyWh,
+    energyDeltaWh,
+    avgPowerW,
+    avgPercentPerHour,
+  );
+  console.log(`[battery-monitor] detected ${kind}: ${(durationSec / 60).toFixed(1)}min, ${avgPowerW == null ? "?" : avgPowerW.toFixed(2)}W avg, ${avgPercentPerHour == null ? "?" : avgPercentPerHour.toFixed(2)}%/h`);
 }
 
 function currentBaselineWatts(totalPowerW: number): number {
@@ -673,6 +708,22 @@ function initDb() {
     is_self INTEGER NOT NULL,
     FOREIGN KEY(process_id) REFERENCES process_identities(id)
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS sleep_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER NOT NULL,
+    duration_sec REAL NOT NULL,
+    kind TEXT NOT NULL,
+    start_capacity REAL,
+    end_capacity REAL,
+    capacity_delta REAL,
+    start_energy_wh REAL,
+    end_energy_wh REAL,
+    energy_delta_wh REAL,
+    avg_power_w REAL,
+    avg_percent_per_hour REAL,
+    UNIQUE(start_ts, end_ts)
+  )`);
   db.run(`CREATE TABLE IF NOT EXISTS environment_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sample_id INTEGER NOT NULL,
@@ -704,7 +755,28 @@ function initDb() {
   db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_ts ON process_samples_v2(ts)");
   db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_sample ON process_samples_v2(sample_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_identity ON process_samples_v2(process_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sleep_events_time ON sleep_events(start_ts, end_ts)");
   db.run("CREATE INDEX IF NOT EXISTS idx_environment_ts ON environment_samples(ts)");
+}
+
+function loadLatestBatteryFromDb(): BatterySample | null {
+  try {
+    const row = db.query("SELECT ts,on_battery,status,capacity,energy_wh,power_w,source FROM battery_samples ORDER BY ts DESC LIMIT 1").get() as {
+      ts: number; on_battery: number; status: string; capacity: number | null; energy_wh: number | null; power_w: number | null; source: string;
+    } | null;
+    if (!row) return null;
+    return {
+      ts: row.ts,
+      onBattery: Boolean(row.on_battery),
+      status: row.status,
+      capacity: row.capacity,
+      energyWh: row.energy_wh,
+      powerW: row.power_w,
+      source: row.source,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function addColumnIfMissing(table: string, column: string, definition: string) {
@@ -772,6 +844,7 @@ function pruneOld(now: number) {
   db.run("DELETE FROM process_samples WHERE ts < ?", cutoff);
   db.run("DELETE FROM process_samples_v2 WHERE ts < ?", cutoff);
   db.run("DELETE FROM process_identities WHERE id NOT IN (SELECT DISTINCT process_id FROM process_samples_v2)");
+  db.run("DELETE FROM sleep_events WHERE end_ts < ?", cutoff);
   db.run("DELETE FROM environment_samples WHERE ts < ?", cutoff);
   db.run("DELETE FROM battery_samples WHERE ts < ?", cutoff);
 }
@@ -840,6 +913,7 @@ function apiSeries(url: URL) {
   const batteryRows = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts >= ? ORDER BY ts").all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string }[];
   const points = batteryRows.map((b, idx) => {
     const prev = idx > 0 ? batteryRows[idx - 1] : null;
+    const gapBefore = prev ? (b.ts - prev.ts) >= cfg.suspendGapMs : false;
     let batteryRatePctPerHour: number | null = null;
     if (prev?.capacity != null && b.capacity != null) {
       const hoursDelta = Math.max(1 / 3600, (b.ts - prev.ts) / 3600000);
@@ -850,6 +924,8 @@ function apiSeries(url: URL) {
       ts: b.ts,
       batteryPercent: b.capacity,
       batteryRatePctPerHour,
+      gapBefore,
+      gapDurationSec: gapBefore && prev ? (b.ts - prev.ts) / 1000 : 0,
       totalWatts: b.power_w,
       onBattery: Boolean(b.on_battery),
       charging: !b.on_battery && b.status.toLowerCase().includes("charging"),
@@ -869,7 +945,8 @@ function apiSeries(url: URL) {
     else { p.apps.Other = (p.apps.Other ?? 0) + r.watts; otherTotal += r.watts; }
   }
   const finalApps = otherTotal > 0 ? apps.concat("Other") : apps;
-  return { apps: finalApps, points };
+  const sleepEvents = db.query("SELECT start_ts,end_ts,duration_sec,kind,start_capacity,end_capacity,capacity_delta,start_energy_wh,end_energy_wh,energy_delta_wh,avg_power_w,avg_percent_per_hour FROM sleep_events WHERE end_ts >= ? ORDER BY start_ts").all(since) as Record<string, unknown>[];
+  return { apps: finalApps, points, sleepEvents, suspendGapSeconds: cfg.suspendGapMs / 1000 };
 }
 
 function normalizeStoredApp(app: string): string {

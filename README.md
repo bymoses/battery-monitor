@@ -25,6 +25,7 @@ Open: <http://127.0.0.1:3033>
 - Has a `Groups` tab with aggregated per-group usage and expandable subprocess contribution.
 - Keeps an explicit adaptive `System / baseline` row so idle/platform watts are not blamed on apps.
 - Captures screen/theme/media context: brightness, light/dark theme, fan RPM when exposed by the kernel, audio playback state, network rate, probable browser video streaming, and optional focused-window metadata.
+- Detects suspend/sample gaps, estimates average battery loss or charge during sleep, and renders gap bands without connecting process usage across sleep.
 
 Per-group watts are estimates from process samples. Linux exposes total battery draw, not exact watts per PID/tab, so the monitor attributes dynamic power from CPU time + disk I/O deltas.
 
@@ -51,6 +52,7 @@ Important environment variables in `compose.yml`:
 | `BASELINE_MAX_WATTS` | `6` | Adaptive baseline upper clamp. |
 | `HOST_CONFIG_DIR` | `/host/config` | Read-only mounted desktop config for light/dark theme detection. |
 | `FOCUSED_WINDOW_FILE` | `/data/focused-window.json` | Read focused-window JSON written by optional host helper. |
+| `SUSPEND_GAP_SECONDS` | `120` | Treat longer sample gaps as suspend/gap events and estimate average sleep consumption. |
 | `VIDEO_RX_MBPS_THRESHOLD` | `1` | Browser video-stream heuristic network RX threshold. |
 | `MAX_PROCESSES_PER_SAMPLE` | `0` | `0` stores all active processes; positive value stores top N plus self. |
 | `RETENTION_DAYS` | `14` | Deletes older samples hourly. |
@@ -96,6 +98,7 @@ Tables:
 - `process_identities` process/app/cmd text stored once
 - `process_samples_v2` compact per-sample numeric process rows
 - `environment_samples`
+- `sleep_events` suspend/sample gap intervals with average sleep charge/discharge rate
 
 ## Native development
 
