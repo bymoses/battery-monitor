@@ -1051,16 +1051,22 @@ function apiSeries(url: URL) {
     if ((totals.get(must) ?? 0) > 0 && !apps.includes(must)) apps.push(must);
   }
 
-  let batteryRows = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts > ? ORDER BY ts").all(pointsSince) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string }[];
+  let batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid
+    FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
+    WHERE b.ts > ? ORDER BY b.ts`).all(pointsSince) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null }[];
   let dropFirstPoint = false;
   if (afterTs != null && batteryRows.length > 0) {
-    const prevRow = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts <= ? ORDER BY ts DESC LIMIT 1").get(afterTs) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string } | null;
+    const prevRow = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid
+      FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
+      WHERE b.ts <= ? ORDER BY b.ts DESC LIMIT 1`).get(afterTs) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null } | null;
     if (prevRow) {
       batteryRows = [prevRow, ...batteryRows];
       dropFirstPoint = true;
     }
   } else if (afterTs == null) {
-    batteryRows = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts >= ? ORDER BY ts").all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string }[];
+    batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid
+      FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
+      WHERE b.ts >= ? ORDER BY b.ts`).all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null }[];
   }
   let points = batteryRows.map((b, idx) => {
     const prev = idx > 0 ? batteryRows[idx - 1] : null;
@@ -1081,6 +1087,9 @@ function apiSeries(url: URL) {
       onBattery: Boolean(b.on_battery),
       charging: !b.on_battery && b.status.toLowerCase().includes("charging"),
       status: b.status,
+      focusedApp: b.focused_app ?? "",
+      focusedTitle: b.focused_title ?? "",
+      focusedPid: b.focused_pid ?? null,
       apps: {} as Record<string, number>,
     };
   });

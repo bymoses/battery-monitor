@@ -23,6 +23,7 @@ Open: <http://127.0.0.1:3033>
 - Includes its own Bun process as `battery-monitor` so you can verify it stays cheap.
 - Groups related helper processes under app families, e.g. Zen web content/extensions under `Zen Browser`, and container descendants under `Docker`.
 - Has a `Groups` tab with aggregated per-group usage and expandable subprocess contribution.
+- Shows focused-window history as a compact timeline strip; hover reveals the title at that moment.
 - Keeps an explicit adaptive `System / baseline` row so idle/platform watts are not blamed on apps.
 - Captures screen/theme/media context: brightness, light/dark theme, fan RPM when exposed by the kernel, audio playback state, network rate, probable browser video streaming, and optional focused-window metadata.
 - Detects suspend/sample gaps, estimates average battery loss or charge during sleep, and renders gap bands without connecting process usage across sleep.
