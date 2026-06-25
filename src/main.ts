@@ -898,6 +898,9 @@ function apiSeries(url: URL) {
   const hours = clamp(Number(url.searchParams.get("hours") ?? 8), 1, 24 * 30);
   const top = clamp(Number(url.searchParams.get("top") ?? 12), 1, 50);
   const since = Date.now() - hours * 60 * 60 * 1000;
+  const afterTsRaw = Number(url.searchParams.get("after_ts"));
+  const afterTs = Number.isFinite(afterTsRaw) && afterTsRaw > since ? afterTsRaw : null;
+  const pointsSince = afterTs ?? since;
 
   const rawTopRows = db.query(`SELECT app, SUM(estimated_watts) AS total FROM (${processRowsViewSql}) WHERE ts >= ? GROUP BY app ORDER BY total DESC`).all(since) as { app: string; total: number }[];
   const totals = new Map<string, number>();
@@ -910,8 +913,18 @@ function apiSeries(url: URL) {
     if ((totals.get(must) ?? 0) > 0 && !apps.includes(must)) apps.push(must);
   }
 
-  const batteryRows = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts >= ? ORDER BY ts").all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string }[];
-  const points = batteryRows.map((b, idx) => {
+  let batteryRows = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts > ? ORDER BY ts").all(pointsSince) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string }[];
+  let dropFirstPoint = false;
+  if (afterTs != null && batteryRows.length > 0) {
+    const prevRow = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts <= ? ORDER BY ts DESC LIMIT 1").get(afterTs) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string } | null;
+    if (prevRow) {
+      batteryRows = [prevRow, ...batteryRows];
+      dropFirstPoint = true;
+    }
+  } else if (afterTs == null) {
+    batteryRows = db.query("SELECT id,ts,capacity,power_w,on_battery,status FROM battery_samples WHERE ts >= ? ORDER BY ts").all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string }[];
+  }
+  let points = batteryRows.map((b, idx) => {
     const prev = idx > 0 ? batteryRows[idx - 1] : null;
     const gapBefore = prev ? (b.ts - prev.ts) >= cfg.suspendGapMs : false;
     let batteryRatePctPerHour: number | null = null;
@@ -933,10 +946,11 @@ function apiSeries(url: URL) {
       apps: {} as Record<string, number>,
     };
   });
+  if (dropFirstPoint) points = points.slice(1);
   const bySample = new Map(points.map((p) => [p.sampleId, p]));
   let otherTotal = 0;
 
-  const aggRows = db.query(`SELECT sample_id, app, SUM(estimated_watts) AS watts FROM (${processRowsViewSql}) WHERE ts >= ? GROUP BY sample_id, app ORDER BY sample_id`).all(since) as { sample_id: number; app: string; watts: number }[];
+  const aggRows = db.query(`SELECT sample_id, app, SUM(estimated_watts) AS watts FROM (${processRowsViewSql}) WHERE ts > ? GROUP BY sample_id, app ORDER BY sample_id`).all(pointsSince) as { sample_id: number; app: string; watts: number }[];
   for (const r of aggRows) {
     const p = bySample.get(r.sample_id);
     if (!p) continue;
@@ -945,8 +959,8 @@ function apiSeries(url: URL) {
     else { p.apps.Other = (p.apps.Other ?? 0) + r.watts; otherTotal += r.watts; }
   }
   const finalApps = otherTotal > 0 ? apps.concat("Other") : apps;
-  const sleepEvents = db.query("SELECT start_ts,end_ts,duration_sec,kind,start_capacity,end_capacity,capacity_delta,start_energy_wh,end_energy_wh,energy_delta_wh,avg_power_w,avg_percent_per_hour FROM sleep_events WHERE end_ts >= ? ORDER BY start_ts").all(since) as Record<string, unknown>[];
-  return { apps: finalApps, points, sleepEvents, suspendGapSeconds: cfg.suspendGapMs / 1000 };
+  const sleepEvents = db.query("SELECT start_ts,end_ts,duration_sec,kind,start_capacity,end_capacity,capacity_delta,start_energy_wh,end_energy_wh,energy_delta_wh,avg_power_w,avg_percent_per_hour FROM sleep_events WHERE end_ts > ? ORDER BY start_ts").all(pointsSince) as Record<string, unknown>[];
+  return { apps: finalApps, points, sleepEvents, suspendGapSeconds: cfg.suspendGapMs / 1000, incremental: afterTs != null, since, afterTs };
 }
 
 function normalizeStoredApp(app: string): string {
