@@ -1,5 +1,6 @@
 import { fetchGroups, fetchProcesses, fetchSeries, fetchStatus } from './api.js';
 import { drawCharts, setSeries, setupTimelineHover } from './charts.js';
+import { getTimezoneOffsetHours, setTimezoneOffsetHours, timezoneLabel } from './format.js';
 import { renderGroups, renderLegend, renderProcessTable, renderStatus, setupTabs } from './views.js';
 
 let currentSeries = null;
@@ -91,14 +92,37 @@ function isStale(requestId) {
 }
 
 function boot() {
+  setupTimezoneSelector();
   setupTabs();
   setupTimelineHover();
   window.addEventListener('resize', drawCharts);
   document.getElementById('refresh').onclick = () => refresh({ full: true }).catch(console.error);
   document.getElementById('hours').onchange = () => refresh({ full: true }).catch(console.error);
   document.getElementById('top').onchange = () => refresh({ full: true }).catch(console.error);
+  document.getElementById('timezone').onchange = (event) => {
+    setTimezoneOffsetHours(event.target.value);
+    renderExistingWithNewTimezone();
+  };
   setInterval(() => refresh().catch(console.error), 30000);
   refresh({ full: true }).catch(e => { console.error(e); alert(e.message); });
+}
+
+function setupTimezoneSelector() {
+  const select = document.getElementById('timezone');
+  const offsets = ['local', ...Array.from({ length: 27 }, (_, i) => i - 12)];
+  select.innerHTML = offsets.map(offset => {
+    const value = offset === 'local' ? 'NaN' : String(offset);
+    return '<option value="' + value + '">' + (offset === 'local' ? 'Local' : timezoneLabel(offset)) + '</option>';
+  }).join('');
+  select.value = String(getTimezoneOffsetHours());
+}
+
+function renderExistingWithNewTimezone() {
+  if (currentSeries) {
+    setSeries(currentSeries);
+    drawCharts();
+  }
+  refresh().catch(console.error);
 }
 
 boot();

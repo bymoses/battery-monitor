@@ -1,4 +1,4 @@
-import { escapeHtml, fmtDuration, fmtPct, fmtW } from './format.js';
+import { escapeHtml, fmtDateTime, fmtDuration, fmtPct, fmtTime, fmtW } from './format.js';
 
 export const colors = ['#60a5fa','#34d399','#fbbf24','#f472b6','#a78bfa','#fb7185','#22d3ee','#c084fc','#4ade80','#f97316','#93c5fd','#e879f9','#d9f99d','#facc15','#38bdf8'];
 
@@ -196,8 +196,8 @@ function drawFocusChart() {
   }
   drawHoverLine(ctx, x, padT, h-padB);
   ctx.fillStyle = '#94a3b8'; ctx.font = '11px system-ui';
-  ctx.fillText(new Date(t0).toLocaleTimeString(), padL, h-5);
-  ctx.fillText(new Date(t1).toLocaleTimeString(), w-130, h-5);
+  ctx.fillText(fmtTime(t0), padL, h-5);
+  ctx.fillText(fmtTime(t1), w-130, h-5);
 }
 
 function focusSegmentLabel(point) {
@@ -324,7 +324,7 @@ function handleTimelineHover(ev) {
   const stateText = [p.lidClosed ? 'lid closed' : '', p.screenLocked ? 'screen locked' : ''].filter(Boolean).join(' / ');
   const brightnessText = p.brightnessPercent == null ? '' : '<br>brightness: '+fmtPct(p.brightnessPercent)+' / theme: '+escapeHtml(p.theme || 'unknown');
   const focusedText = sleep ? '' : (stateText ? '<br><b>'+escapeHtml(stateText)+'</b>' : '') + (p.focusedApp || p.focusedTitle ? '<br><b>focused: '+escapeHtml(p.focusedApp || 'unknown')+'</b>' + (p.focusedTitle ? '<br>'+escapeHtml(p.focusedTitle) : '') : '');
-  tip.innerHTML = '<b>'+new Date(hoverTs).toLocaleString()+'</b><br>' +
+  tip.innerHTML = '<b>'+fmtDateTime(hoverTs)+'</b><br>' +
     (sleep ? 'no process samples during sleep/gap<br>nearest battery sample: ' : '') +
     'battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + brightnessText + sleepText + focusedText +
     (hovered ? '<br><b style="color:#fbbf24">hover: '+escapeHtml(hovered)+'</b>' : '') + '<br>' +
