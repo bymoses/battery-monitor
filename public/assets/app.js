@@ -4,9 +4,11 @@ import { renderGroups, renderLegend, renderProcessTable, renderStatus, setupTabs
 
 let currentSeries = null;
 let currentKey = '';
-let lastFullSeriesAt = 0;
+let lastHeavyPanelsAt = 0;
+let requestSeq = 0;
 
 async function refresh({ full = false } = {}) {
+  const requestId = ++requestSeq;
   const hours = document.getElementById('hours').value;
   const top = document.getElementById('top').value;
   const key = hours + ':' + top;
@@ -16,23 +18,49 @@ async function refresh({ full = false } = {}) {
   }
 
   const afterTs = !full && currentSeries?.points?.length ? currentSeries.points.at(-1).ts : null;
-  const shouldRefreshHeavyPanels = full || !currentSeries || Date.now() - lastFullSeriesAt > 5 * 60 * 1000;
+  const shouldRefreshHeavyPanels = full || !currentSeries || Date.now() - lastHeavyPanelsAt > 5 * 60 * 1000;
+  const tasks = [];
 
-  const [status, nextSeries, latest, groups] = await Promise.all([
-    fetchStatus(),
-    fetchSeries({ hours, top, afterTs }),
-    shouldRefreshHeavyPanels ? fetchProcesses() : Promise.resolve(null),
-    shouldRefreshHeavyPanels ? fetchGroups({ hours }) : Promise.resolve(null),
-  ]);
+  tasks.push(fetchStatus()
+    .then(status => {
+      if (isStale(requestId)) return;
+      renderStatus(status);
+    }));
 
-  currentSeries = mergeSeries(currentSeries, nextSeries, { hours, top, full });
-  setSeries(currentSeries);
-  renderStatus(status);
-  drawCharts();
-  renderLegend(currentSeries.apps || []);
-  if (latest) renderProcessTable(latest.rows || []);
-  if (groups) renderGroups(groups);
-  if (full || shouldRefreshHeavyPanels) lastFullSeriesAt = Date.now();
+  tasks.push(fetchSeries({ hours, top, afterTs })
+    .then(nextSeries => {
+      if (isStale(requestId)) return;
+      currentSeries = mergeSeries(currentSeries, nextSeries, { hours, full });
+      setSeries(currentSeries);
+      drawCharts();
+      renderLegend(currentSeries.apps || []);
+    }));
+
+  if (shouldRefreshHeavyPanels) {
+    setHeavyLoadingState();
+
+    tasks.push(fetchProcesses()
+      .then(latest => {
+        if (isStale(requestId)) return;
+        renderProcessTable(latest.rows || []);
+      }));
+
+    tasks.push(fetchGroups({ hours })
+      .then(groups => {
+        if (isStale(requestId)) return;
+        renderGroups(groups);
+        lastHeavyPanelsAt = Date.now();
+      }));
+  }
+
+  const results = await Promise.allSettled(tasks);
+  const rejected = results.find(r => r.status === 'rejected');
+  if (rejected) throw rejected.reason;
+}
+
+function setHeavyLoadingState() {
+  document.getElementById('rows').innerHTML = '<tr><td colspan="7" class="muted">Loading latest processes…</td></tr>';
+  document.getElementById('groupRows').innerHTML = '<tr><td colspan="7" class="muted">Loading groups…</td></tr>';
 }
 
 function mergeSeries(existing, incoming, { hours, full }) {
@@ -58,13 +86,17 @@ function sameList(a, b) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
+function isStale(requestId) {
+  return requestId !== requestSeq;
+}
+
 function boot() {
   setupTabs();
   setupTimelineHover();
   window.addEventListener('resize', drawCharts);
-  document.getElementById('refresh').onclick = () => refresh({ full: true });
-  document.getElementById('hours').onchange = () => refresh({ full: true });
-  document.getElementById('top').onchange = () => refresh({ full: true });
+  document.getElementById('refresh').onclick = () => refresh({ full: true }).catch(console.error);
+  document.getElementById('hours').onchange = () => refresh({ full: true }).catch(console.error);
+  document.getElementById('top').onchange = () => refresh({ full: true }).catch(console.error);
   setInterval(() => refresh().catch(console.error), 30000);
   refresh({ full: true }).catch(e => { console.error(e); alert(e.message); });
 }
