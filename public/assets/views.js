@@ -19,8 +19,9 @@ export function renderStatus(status) {
   setText('samples', (status.processRows || 0) + ' process rows stored');
 
   const e = status.latestEnvironment;
+  const screenState = e ? [e.screen_locked ? 'locked' : '', e.lid_closed ? 'lid closed' : ''].filter(Boolean).join(' / ') : '';
   setText('screen', e ? (e.brightness_percent == null ? 'brightness ?' : fmtPct(e.brightness_percent)) : '—');
-  setText('theme', e ? ((e.theme || 'unknown') + ' theme / ' + (e.brightness_source || 'no backlight')) : '—');
+  setText('theme', e ? ((e.theme || 'unknown') + ' theme / ' + (e.brightness_source || 'no backlight') + (screenState ? ' / ' + screenState : '')) : '—');
   setText('media', e ? ((e.audio_playing ? 'audio' : 'silent') + ' / ' + (e.video_streaming ? 'video?' : 'no video')) : '—');
   setText('network', e ? ('RX ' + (e.net_rx_mbps || 0).toFixed(2) + ' Mbps / TX ' + (e.net_tx_mbps || 0).toFixed(2) + ' Mbps') : '—');
   setText('fan', e?.fan_rpm == null ? '—' : Math.round(e.fan_rpm) + ' RPM');

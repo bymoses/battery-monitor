@@ -36,6 +36,10 @@ type EnvironmentSample = {
   focusedApp: string;
   focusedTitle: string;
   focusedPid: number | null;
+  lidClosed: boolean | null;
+  lidDetail: string;
+  screenLocked: boolean | null;
+  screenLockDetail: string;
   fanRpm: number | null;
   fanSource: string;
 };
@@ -315,6 +319,8 @@ function readEnvironment(sampleId: number, ts: number, rows: ProcRow[]): Environ
   const audio = readAudioState();
   const net = readNetworkRates(ts);
   const focused = readFocusedWindow();
+  const lid = readLidState();
+  const lock = readScreenLockState();
   const fan = readFanSpeed();
   const browserWatts = rows
     .filter((r) => ["Zen Browser", "Firefox", "Chrome/Chromium"].includes(r.app))
@@ -344,9 +350,39 @@ function readEnvironment(sampleId: number, ts: number, rows: ProcRow[]): Environ
     focusedApp: focused.app,
     focusedTitle: focused.title,
     focusedPid: focused.pid,
+    lidClosed: lid.closed,
+    lidDetail: lid.detail,
+    screenLocked: lock.locked,
+    screenLockDetail: lock.detail,
     fanRpm: fan.rpm,
     fanSource: fan.source,
   };
+}
+
+function readLidState(): { closed: boolean | null; detail: string } {
+  const root = path.join(cfg.procRoot, "acpi", "button", "lid");
+  const states: string[] = [];
+  for (const lid of safeReaddir(root)) {
+    const state = safeReadTrim(path.join(root, lid, "state"));
+    if (state) states.push(`${lid}: ${state.replace(/\s+/g, " ")}`);
+  }
+  if (states.length === 0) return { closed: null, detail: "no ACPI lid state" };
+  const detail = states.join(", ");
+  return { closed: /closed/i.test(detail), detail };
+}
+
+function readScreenLockState(): { locked: boolean | null; detail: string } {
+  const lockers = ["swaylock", "hyprlock", "gtklock", "waylock", "i3lock", "xsecurelock", "kscreenlocker", "gnome-screensaver"];
+  for (const name of safeReaddir(cfg.procRoot)) {
+    if (!/^\d+$/.test(name)) continue;
+    const dir = path.join(cfg.procRoot, name);
+    const comm = safeReadTrim(path.join(dir, "comm"));
+    const cmd = readCmdline(path.join(dir, "cmdline")) || comm;
+    const lower = `${comm} ${cmd}`.toLowerCase();
+    const locker = lockers.find((l) => lower.includes(l));
+    if (locker) return { locked: true, detail: `${locker} pid ${name}` };
+  }
+  return { locked: false, detail: "no known lock-screen process" };
 }
 
 function readFanSpeed(): { rpm: number | null; source: string } {
@@ -778,12 +814,20 @@ function initDb() {
     focused_app TEXT NOT NULL DEFAULT '',
     focused_title TEXT NOT NULL DEFAULT '',
     focused_pid INTEGER,
+    lid_closed INTEGER,
+    lid_detail TEXT NOT NULL DEFAULT '',
+    screen_locked INTEGER,
+    screen_lock_detail TEXT NOT NULL DEFAULT '',
     fan_rpm REAL,
     fan_source TEXT NOT NULL DEFAULT ''
   )`);
   addColumnIfMissing("environment_samples", "focused_app", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing("environment_samples", "focused_title", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing("environment_samples", "focused_pid", "INTEGER");
+  addColumnIfMissing("environment_samples", "lid_closed", "INTEGER");
+  addColumnIfMissing("environment_samples", "lid_detail", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing("environment_samples", "screen_locked", "INTEGER");
+  addColumnIfMissing("environment_samples", "screen_lock_detail", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing("environment_samples", "fan_rpm", "REAL");
   addColumnIfMissing("environment_samples", "fan_source", "TEXT NOT NULL DEFAULT ''");
   db.run("CREATE INDEX IF NOT EXISTS idx_battery_ts ON battery_samples(ts)");
@@ -950,8 +994,8 @@ function backfillSampleGroupTotals() {
 
 function insertEnvironment(e: EnvironmentSample) {
   db.run(`INSERT INTO environment_samples
-    (sample_id,ts,theme,theme_detail,brightness_percent,brightness_source,audio_playing,audio_detail,video_streaming,video_detail,net_rx_mbps,net_tx_mbps,focused_app,focused_title,focused_pid,fan_rpm,fan_source)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    (sample_id,ts,theme,theme_detail,brightness_percent,brightness_source,audio_playing,audio_detail,video_streaming,video_detail,net_rx_mbps,net_tx_mbps,focused_app,focused_title,focused_pid,lid_closed,lid_detail,screen_locked,screen_lock_detail,fan_rpm,fan_source)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     e.sampleId,
     e.ts,
     e.theme,
@@ -967,6 +1011,10 @@ function insertEnvironment(e: EnvironmentSample) {
     e.focusedApp,
     e.focusedTitle,
     e.focusedPid,
+    e.lidClosed == null ? null : e.lidClosed ? 1 : 0,
+    e.lidDetail,
+    e.screenLocked == null ? null : e.screenLocked ? 1 : 0,
+    e.screenLockDetail,
     e.fanRpm,
     e.fanSource,
   );
@@ -994,7 +1042,7 @@ const processRowsViewSql = `
 
 function apiStatus() {
   const latestBattery = db.query("SELECT id,ts,on_battery,status,capacity,energy_wh,power_w,source FROM battery_samples ORDER BY ts DESC LIMIT 1").get() as Record<string, unknown> | null;
-  const latestEnvironment = db.query("SELECT ts,theme,theme_detail,brightness_percent,brightness_source,audio_playing,audio_detail,video_streaming,video_detail,net_rx_mbps,net_tx_mbps,focused_app,focused_title,focused_pid,fan_rpm,fan_source FROM environment_samples ORDER BY ts DESC LIMIT 1").get() as Record<string, unknown> | null;
+  const latestEnvironment = db.query("SELECT ts,theme,theme_detail,brightness_percent,brightness_source,audio_playing,audio_detail,video_streaming,video_detail,net_rx_mbps,net_tx_mbps,focused_app,focused_title,focused_pid,lid_closed,lid_detail,screen_locked,screen_lock_detail,fan_rpm,fan_source FROM environment_samples ORDER BY ts DESC LIMIT 1").get() as Record<string, unknown> | null;
   const selfLatest = db.query(`SELECT ts,pid,app,cpu_percent,io_mb,rss_mb,estimated_watts FROM (${processRowsViewSql}) WHERE is_self=1 ORDER BY ts DESC LIMIT 1`).get() as Record<string, unknown> | null;
   const legacyRows = (db.query("SELECT COUNT(*) AS n FROM process_samples").get() as { n: number }).n;
   const v2Rows = (db.query("SELECT COUNT(*) AS n FROM process_samples_v2").get() as { n: number }).n;
@@ -1051,22 +1099,22 @@ function apiSeries(url: URL) {
     if ((totals.get(must) ?? 0) > 0 && !apps.includes(must)) apps.push(must);
   }
 
-  let batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid
+  let batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail
     FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
-    WHERE b.ts > ? ORDER BY b.ts`).all(pointsSince) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null }[];
+    WHERE b.ts > ? ORDER BY b.ts`).all(pointsSince) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null; lid_closed: number | null; lid_detail: string | null; screen_locked: number | null; screen_lock_detail: string | null }[];
   let dropFirstPoint = false;
   if (afterTs != null && batteryRows.length > 0) {
-    const prevRow = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid
+    const prevRow = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail
       FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
-      WHERE b.ts <= ? ORDER BY b.ts DESC LIMIT 1`).get(afterTs) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null } | null;
+      WHERE b.ts <= ? ORDER BY b.ts DESC LIMIT 1`).get(afterTs) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null; lid_closed: number | null; lid_detail: string | null; screen_locked: number | null; screen_lock_detail: string | null } | null;
     if (prevRow) {
       batteryRows = [prevRow, ...batteryRows];
       dropFirstPoint = true;
     }
   } else if (afterTs == null) {
-    batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid
+    batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail
       FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
-      WHERE b.ts >= ? ORDER BY b.ts`).all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null }[];
+      WHERE b.ts >= ? ORDER BY b.ts`).all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null; lid_closed: number | null; lid_detail: string | null; screen_locked: number | null; screen_lock_detail: string | null }[];
   }
   let points = batteryRows.map((b, idx) => {
     const prev = idx > 0 ? batteryRows[idx - 1] : null;
@@ -1090,6 +1138,10 @@ function apiSeries(url: URL) {
       focusedApp: b.focused_app ?? "",
       focusedTitle: b.focused_title ?? "",
       focusedPid: b.focused_pid ?? null,
+      lidClosed: b.lid_closed == null ? null : Boolean(b.lid_closed),
+      lidDetail: b.lid_detail ?? "",
+      screenLocked: b.screen_locked == null ? null : Boolean(b.screen_locked),
+      screenLockDetail: b.screen_lock_detail ?? "",
       apps: {} as Record<string, number>,
     };
   });

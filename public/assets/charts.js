@@ -132,20 +132,21 @@ function drawFocusChart() {
   const y = padT + 16, barH = Math.max(12, h - padT - padB - 18);
   for (let i=0;i<pts.length-1;i++) {
     const p = pts[i], next = pts[i+1];
+    if (next.gapBefore) continue;
     const sx = x(p.ts), ex = x(next.ts);
-    const app = p.focusedApp || 'unknown';
-    ctx.fillStyle = focusColor(app);
+    const label = focusSegmentLabel(p);
+    ctx.fillStyle = focusColor(label);
     ctx.fillRect(sx, y, Math.max(1, ex - sx), barH);
   }
   // Draw labels for long contiguous focused app runs.
   let start = 0;
   for (let i=1;i<=pts.length;i++) {
-    const changed = i === pts.length || (pts[i].focusedApp || '') !== (pts[start].focusedApp || '') || pts[i].gapBefore;
+    const changed = i === pts.length || focusSegmentLabel(pts[i]) !== focusSegmentLabel(pts[start]) || pts[i].gapBefore;
     if (!changed) continue;
     const sx = x(pts[start].ts), ex = x(pts[Math.max(start, i-1)].ts);
-    if (ex - sx > 80) {
+    if (ex - sx > 80 && !pts[start + 1]?.gapBefore) {
       ctx.fillStyle = '#e2e8f0'; ctx.font = '11px system-ui';
-      ctx.fillText((pts[start].focusedApp || 'unknown').slice(0, 22), sx + 4, y + barH - 4);
+      ctx.fillText(focusSegmentLabel(pts[start]).slice(0, 22), sx + 4, y + barH - 4);
     }
     start = i;
   }
@@ -155,8 +156,17 @@ function drawFocusChart() {
   ctx.fillText(new Date(t1).toLocaleTimeString(), w-130, h-5);
 }
 
+function focusSegmentLabel(point) {
+  if (!point) return 'unknown';
+  if (point.lidClosed) return 'lid closed';
+  if (point.screenLocked) return 'locked';
+  return point.focusedApp || 'unknown';
+}
+
 function focusColor(app) {
   if (!app) return '#334155';
+  if (app === 'locked') return '#f97316aa';
+  if (app === 'lid closed') return '#64748baa';
   return colors[Math.abs(hashString(app)) % colors.length] + 'aa';
 }
 
@@ -267,7 +277,8 @@ function handleTimelineHover(ev) {
   const rate = p.batteryRatePctPerHour;
   const rateText = typeof rate === 'number' && isFinite(rate) ? ' / rate ' + (rate >= 0 ? '+' : '') + rate.toFixed(2) + '%/h' : '';
   const sleepText = sleep ? '<br><b style="color:#fbbf24">'+escapeHtml(sleep.kind || 'sleep gap')+': '+fmtDuration(Number(sleep.duration_sec)/3600)+', avg '+(sleep.avg_power_w == null ? '?' : Math.abs(Number(sleep.avg_power_w)).toFixed(2)+'W')+', '+(sleep.avg_percent_per_hour == null ? '?' : Number(sleep.avg_percent_per_hour).toFixed(2)+'%/h')+'</b>' : '';
-  const focusedText = p.focusedApp || p.focusedTitle ? '<br><b>focused: '+escapeHtml(p.focusedApp || 'unknown')+'</b>' + (p.focusedTitle ? '<br>'+escapeHtml(p.focusedTitle) : '') : '';
+  const stateText = [p.lidClosed ? 'lid closed' : '', p.screenLocked ? 'screen locked' : ''].filter(Boolean).join(' / ');
+  const focusedText = sleep ? '' : (stateText ? '<br><b>'+escapeHtml(stateText)+'</b>' : '') + (p.focusedApp || p.focusedTitle ? '<br><b>focused: '+escapeHtml(p.focusedApp || 'unknown')+'</b>' + (p.focusedTitle ? '<br>'+escapeHtml(p.focusedTitle) : '') : '');
   tip.innerHTML = '<b>'+new Date(hoverTs).toLocaleString()+'</b><br>' +
     (sleep ? 'no process samples during sleep/gap<br>nearest battery sample: ' : '') +
     'battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + sleepText + focusedText +
