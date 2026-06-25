@@ -17,7 +17,7 @@ export function drawCharts() {
 
 export function setupTimelineHover() {
   tip = document.getElementById('tip');
-  for (const id of ['chart', 'rateChart', 'focusChart']) {
+  for (const id of ['chart', 'rateChart', 'brightnessChart', 'focusChart']) {
     document.getElementById(id).addEventListener('mousemove', handleTimelineHover);
     document.getElementById(id).addEventListener('mouseleave', clearTimelineHover);
   }
@@ -33,7 +33,7 @@ function drawMainChart() {
   ctx.clearRect(0,0,w,h);
   ctx.fillStyle = '#0d1424'; ctx.fillRect(0,0,w,h);
   if (!series || !series.points || series.points.length < 2) {
-    ctx.fillStyle='#94a3b8'; ctx.fillText('Waiting for at least two samples…', 20, 30); drawRateChart(); drawFocusChart(); return;
+    ctx.fillStyle='#94a3b8'; ctx.fillText('Waiting for at least two samples…', 20, 30); drawRateChart(); drawBrightnessChart(); drawFocusChart(); return;
   }
   const pts = series.points, apps = series.apps;
   const t0 = pts[0].ts, t1 = pts[pts.length-1].ts;
@@ -60,6 +60,7 @@ function drawMainChart() {
   drawBatteryPercent(ctx, pts, x, chunks, w, h, padR, padT, padB);
   drawHoverLine(ctx, x, padT, h-padB);
   drawRateChart();
+  drawBrightnessChart();
   drawFocusChart();
 }
 
@@ -114,6 +115,49 @@ function drawRateChart() {
   ctx.setLineDash([]);
   ctx.fillStyle = '#cbd5e1'; ctx.fillText('charge / discharge rate', padL, 12);
   drawHoverLine(ctx, x, padT, h-padB);
+}
+
+function drawBrightnessChart() {
+  const canvas = document.getElementById('brightnessChart');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(600, rect.width * dpr); canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height, padL = 52, padR = 46, padT = 12, padB = 20;
+  ctx.clearRect(0,0,w,h); ctx.fillStyle = '#0d1424'; ctx.fillRect(0,0,w,h);
+  if (!series || !series.points || series.points.length < 2) return;
+  const pts = series.points, t0 = pts[0].ts, t1 = pts[pts.length-1].ts;
+  const x = ts => padL + (ts - t0) / Math.max(1, t1 - t0) * (w - padL - padR);
+  const y = pct => padT + (1 - (pct ?? 0) / 100) * (h - padT - padB);
+  drawThemeBands(ctx, pts, x, padT, h-padB);
+  drawSleepBands(ctx, x, padT, h-padB);
+  ctx.strokeStyle = '#233044'; ctx.fillStyle = '#94a3b8'; ctx.font = '11px system-ui'; ctx.lineWidth = 1;
+  for (const pct of [0, 50, 100]) { const yy = y(pct); ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w-padR, yy); ctx.stroke(); ctx.fillText(pct + '%', 12, yy + 4); }
+  ctx.strokeStyle = '#facc15'; ctx.lineWidth = 2;
+  for (const [start, end] of timelineChunks(pts)) {
+    ctx.beginPath();
+    let started = false;
+    for (let i=start;i<=end;i++) {
+      if (pts[i].brightnessPercent == null) continue;
+      const yy = y(pts[i].brightnessPercent);
+      started ? ctx.lineTo(x(pts[i].ts), yy) : ctx.moveTo(x(pts[i].ts), yy);
+      started = true;
+    }
+    if (started) ctx.stroke();
+  }
+  ctx.fillStyle = '#cbd5e1'; ctx.font = '11px system-ui'; ctx.fillText('screen brightness / theme', padL, 12);
+  drawHoverLine(ctx, x, padT, h-padB);
+}
+
+function drawThemeBands(ctx, pts, x, y1, y2) {
+  for (let i=0;i<pts.length-1;i++) {
+    const p = pts[i], next = pts[i+1];
+    if (next.gapBefore) continue;
+    const theme = String(p.theme || 'unknown').toLowerCase();
+    if (theme === 'unknown') continue;
+    ctx.fillStyle = theme.includes('light') ? 'rgba(250,204,21,0.10)' : 'rgba(59,130,246,0.08)';
+    ctx.fillRect(x(p.ts), y1, Math.max(1, x(next.ts) - x(p.ts)), y2 - y1);
+  }
 }
 
 function drawFocusChart() {
@@ -278,10 +322,11 @@ function handleTimelineHover(ev) {
   const rateText = typeof rate === 'number' && isFinite(rate) ? ' / rate ' + (rate >= 0 ? '+' : '') + rate.toFixed(2) + '%/h' : '';
   const sleepText = sleep ? '<br><b style="color:#fbbf24">'+escapeHtml(sleep.kind || 'sleep gap')+': '+fmtDuration(Number(sleep.duration_sec)/3600)+', avg '+(sleep.avg_power_w == null ? '?' : Math.abs(Number(sleep.avg_power_w)).toFixed(2)+'W')+', '+(sleep.avg_percent_per_hour == null ? '?' : Number(sleep.avg_percent_per_hour).toFixed(2)+'%/h')+'</b>' : '';
   const stateText = [p.lidClosed ? 'lid closed' : '', p.screenLocked ? 'screen locked' : ''].filter(Boolean).join(' / ');
+  const brightnessText = p.brightnessPercent == null ? '' : '<br>brightness: '+fmtPct(p.brightnessPercent)+' / theme: '+escapeHtml(p.theme || 'unknown');
   const focusedText = sleep ? '' : (stateText ? '<br><b>'+escapeHtml(stateText)+'</b>' : '') + (p.focusedApp || p.focusedTitle ? '<br><b>focused: '+escapeHtml(p.focusedApp || 'unknown')+'</b>' + (p.focusedTitle ? '<br>'+escapeHtml(p.focusedTitle) : '') : '');
   tip.innerHTML = '<b>'+new Date(hoverTs).toLocaleString()+'</b><br>' +
     (sleep ? 'no process samples during sleep/gap<br>nearest battery sample: ' : '') +
-    'battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + sleepText + focusedText +
+    'battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + brightnessText + sleepText + focusedText +
     (hovered ? '<br><b style="color:#fbbf24">hover: '+escapeHtml(hovered)+'</b>' : '') + '<br>' +
     (lines.length ? lines.map(([a,v]) => (a === hovered ? '<b style="color:#fbbf24">▸ '+escapeHtml(a)+': '+fmtW(v)+'</b>' : escapeHtml(a)+': '+fmtW(v))).join('<br>') : '<span class="muted">gap interval</span>');
 }

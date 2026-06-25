@@ -58,6 +58,26 @@ type ProcNow = {
   isSelf: boolean;
 };
 
+type SeriesBatteryRow = {
+  id: number;
+  ts: number;
+  capacity: number | null;
+  power_w: number | null;
+  on_battery: number;
+  status: string;
+  focused_app: string | null;
+  focused_title: string | null;
+  focused_pid: number | null;
+  lid_closed: number | null;
+  lid_detail: string | null;
+  screen_locked: number | null;
+  screen_lock_detail: string | null;
+  brightness_percent: number | null;
+  brightness_source: string | null;
+  theme: string | null;
+  theme_detail: string | null;
+};
+
 type ProcPrev = Pick<ProcNow, "ticks" | "startTime" | "readBytes" | "writeBytes">;
 
 type ProcRow = ProcNow & {
@@ -1099,22 +1119,28 @@ function apiSeries(url: URL) {
     if ((totals.get(must) ?? 0) > 0 && !apps.includes(must)) apps.push(must);
   }
 
-  let batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail
+  let batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,
+      e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail,
+      e.brightness_percent,e.brightness_source,e.theme,e.theme_detail
     FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
-    WHERE b.ts > ? ORDER BY b.ts`).all(pointsSince) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null; lid_closed: number | null; lid_detail: string | null; screen_locked: number | null; screen_lock_detail: string | null }[];
+    WHERE b.ts > ? ORDER BY b.ts`).all(pointsSince) as SeriesBatteryRow[];
   let dropFirstPoint = false;
   if (afterTs != null && batteryRows.length > 0) {
-    const prevRow = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail
+    const prevRow = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,
+        e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail,
+        e.brightness_percent,e.brightness_source,e.theme,e.theme_detail
       FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
-      WHERE b.ts <= ? ORDER BY b.ts DESC LIMIT 1`).get(afterTs) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null; lid_closed: number | null; lid_detail: string | null; screen_locked: number | null; screen_lock_detail: string | null } | null;
+      WHERE b.ts <= ? ORDER BY b.ts DESC LIMIT 1`).get(afterTs) as SeriesBatteryRow | null;
     if (prevRow) {
       batteryRows = [prevRow, ...batteryRows];
       dropFirstPoint = true;
     }
   } else if (afterTs == null) {
-    batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail
+    batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,
+        e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail,
+        e.brightness_percent,e.brightness_source,e.theme,e.theme_detail
       FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
-      WHERE b.ts >= ? ORDER BY b.ts`).all(since) as { id: number; ts: number; capacity: number | null; power_w: number | null; on_battery: number; status: string; focused_app: string | null; focused_title: string | null; focused_pid: number | null; lid_closed: number | null; lid_detail: string | null; screen_locked: number | null; screen_lock_detail: string | null }[];
+      WHERE b.ts >= ? ORDER BY b.ts`).all(since) as SeriesBatteryRow[];
   }
   let points = batteryRows.map((b, idx) => {
     const prev = idx > 0 ? batteryRows[idx - 1] : null;
@@ -1142,6 +1168,10 @@ function apiSeries(url: URL) {
       lidDetail: b.lid_detail ?? "",
       screenLocked: b.screen_locked == null ? null : Boolean(b.screen_locked),
       screenLockDetail: b.screen_lock_detail ?? "",
+      brightnessPercent: b.brightness_percent ?? null,
+      brightnessSource: b.brightness_source ?? "",
+      theme: b.theme ?? "unknown",
+      themeDetail: b.theme_detail ?? "",
       apps: {} as Record<string, number>,
     };
   });
