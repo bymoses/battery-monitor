@@ -1084,6 +1084,22 @@ function firstWord(s: string) {
   return s.trim().split(/\s+/)[0]?.split("/").pop() ?? "";
 }
 
+function staticAsset(pathname: string) {
+  const publicRoot = path.resolve(import.meta.dir, "..", "public");
+  const filePath = path.resolve(publicRoot, "." + decodeURIComponent(pathname));
+  if (!filePath.startsWith(publicRoot + path.sep)) return new Response("not found\n", { status: 404 });
+  try {
+    const body = readFileSync(filePath);
+    const contentType = filePath.endsWith(".js") ? "text/javascript; charset=utf-8"
+      : filePath.endsWith(".css") ? "text/css; charset=utf-8"
+      : filePath.endsWith(".svg") ? "image/svg+xml"
+      : "application/octet-stream";
+    return new Response(body, { headers: { "content-type": contentType, "cache-control": "no-cache" } });
+  } catch {
+    return new Response("not found\n", { status: 404 });
+  }
+}
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 }
@@ -1124,6 +1140,7 @@ Bun.serve({
     const url = new URL(req.url);
     try {
       if (url.pathname === "/") return new Response(indexHtml, { headers: { "content-type": "text/html; charset=utf-8" } });
+      if (url.pathname.startsWith("/assets/")) return staticAsset(url.pathname);
       if (url.pathname === "/api/status") return json(apiStatus());
       if (url.pathname === "/api/series") return json(apiSeries(url));
       if (url.pathname === "/api/groups") return json(apiGroups(url));
