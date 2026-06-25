@@ -724,6 +724,14 @@ function initDb() {
     avg_percent_per_hour REAL,
     UNIQUE(start_ts, end_ts)
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS sample_app_totals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    app TEXT NOT NULL,
+    watts REAL NOT NULL,
+    UNIQUE(sample_id, app)
+  )`);
   db.run(`CREATE TABLE IF NOT EXISTS environment_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sample_id INTEGER NOT NULL,
@@ -755,6 +763,8 @@ function initDb() {
   db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_ts ON process_samples_v2(ts)");
   db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_sample ON process_samples_v2(sample_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_process_v2_identity ON process_samples_v2(process_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_app_totals_ts_app ON sample_app_totals(ts, app)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_sample_app_totals_sample ON sample_app_totals(sample_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_sleep_events_time ON sleep_events(start_ts, end_ts)");
   db.run("CREATE INDEX IF NOT EXISTS idx_environment_ts ON environment_samples(ts)");
 }
@@ -804,15 +814,32 @@ const insertRowsTx = db.transaction((sampleId: number, ts: number, rows: ProcRow
   const sampleInsert = db.prepare(`INSERT INTO process_samples_v2
     (sample_id,ts,pid,ppid,process_id,cpu_percent,cpu_seconds,io_mb,rss_mb,score,estimated_watts,is_self)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const totalInsert = db.prepare(`INSERT INTO sample_app_totals (sample_id,ts,app,watts) VALUES (?,?,?,?)
+    ON CONFLICT(sample_id, app) DO UPDATE SET watts=excluded.watts, ts=excluded.ts`);
+  const appTotals = new Map<string, number>();
   for (const r of rows) {
     identityInsert.run(r.app, r.name, r.cmd);
     const identity = identitySelect.get(r.app, r.name, r.cmd) as { id: number };
     sampleInsert.run(sampleId, ts, r.pid, r.ppid, identity.id, r.cpuPercent, r.cpuSeconds, r.ioMb, r.rssMb, r.score, r.estimatedWatts, r.isSelf ? 1 : 0);
+    appTotals.set(r.app, (appTotals.get(r.app) ?? 0) + r.estimatedWatts);
   }
+  for (const [app, watts] of appTotals) totalInsert.run(sampleId, ts, app, watts);
 });
 
 function insertProcessRows(sampleId: number, ts: number, rows: ProcRow[]) {
   insertRowsTx(sampleId, ts, rows);
+}
+
+function backfillSampleAppTotals() {
+  const existing = (db.query("SELECT COUNT(*) AS n FROM sample_app_totals").get() as { n: number }).n;
+  const legacyRows = (db.query("SELECT COUNT(*) AS n FROM process_samples").get() as { n: number }).n;
+  const v2Rows = (db.query("SELECT COUNT(*) AS n FROM process_samples_v2").get() as { n: number }).n;
+  if (existing > 0 || legacyRows + v2Rows === 0) return;
+  console.log("[battery-monitor] backfilling sample_app_totals from process samples");
+  db.run(`INSERT OR IGNORE INTO sample_app_totals (sample_id,ts,app,watts)
+    SELECT sample_id, MIN(ts) AS ts, app, SUM(estimated_watts) AS watts
+    FROM (${processRowsViewSql})
+    GROUP BY sample_id, app`);
 }
 
 function insertEnvironment(e: EnvironmentSample) {
@@ -843,6 +870,7 @@ function pruneOld(now: number) {
   const cutoff = now - cfg.retentionDays * 24 * 60 * 60 * 1000;
   db.run("DELETE FROM process_samples WHERE ts < ?", cutoff);
   db.run("DELETE FROM process_samples_v2 WHERE ts < ?", cutoff);
+  db.run("DELETE FROM sample_app_totals WHERE ts < ?", cutoff);
   db.run("DELETE FROM process_identities WHERE id NOT IN (SELECT DISTINCT process_id FROM process_samples_v2)");
   db.run("DELETE FROM sleep_events WHERE end_ts < ?", cutoff);
   db.run("DELETE FROM environment_samples WHERE ts < ?", cutoff);
@@ -860,7 +888,9 @@ function apiStatus() {
   const latestBattery = db.query("SELECT id,ts,on_battery,status,capacity,energy_wh,power_w,source FROM battery_samples ORDER BY ts DESC LIMIT 1").get() as Record<string, unknown> | null;
   const latestEnvironment = db.query("SELECT ts,theme,theme_detail,brightness_percent,brightness_source,audio_playing,audio_detail,video_streaming,video_detail,net_rx_mbps,net_tx_mbps,focused_app,focused_title,focused_pid,fan_rpm,fan_source FROM environment_samples ORDER BY ts DESC LIMIT 1").get() as Record<string, unknown> | null;
   const selfLatest = db.query(`SELECT ts,pid,app,cpu_percent,io_mb,rss_mb,estimated_watts FROM (${processRowsViewSql}) WHERE is_self=1 ORDER BY ts DESC LIMIT 1`).get() as Record<string, unknown> | null;
-  const processRows = (db.query(`SELECT COUNT(*) AS n FROM (${processRowsViewSql})`).get() as { n: number }).n;
+  const legacyRows = (db.query("SELECT COUNT(*) AS n FROM process_samples").get() as { n: number }).n;
+  const v2Rows = (db.query("SELECT COUNT(*) AS n FROM process_samples_v2").get() as { n: number }).n;
+  const processRows = legacyRows + v2Rows;
   return { latestBattery, latestEnvironment, selfLatest, dischargeEstimate: computeBatteryRateEstimate(), processRows, config: { pollSeconds: cfg.pollMs / 1000, baselineMode: cfg.baselineMode, baselineWatts: cfg.baselineWatts, baselineMinWatts: cfg.baselineMinWatts, baselineMaxWatts: cfg.baselineMaxWatts } };
 }
 
@@ -902,7 +932,7 @@ function apiSeries(url: URL) {
   const afterTs = Number.isFinite(afterTsRaw) && afterTsRaw > since ? afterTsRaw : null;
   const pointsSince = afterTs ?? since;
 
-  const rawTopRows = db.query(`SELECT app, SUM(estimated_watts) AS total FROM (${processRowsViewSql}) WHERE ts >= ? GROUP BY app ORDER BY total DESC`).all(since) as { app: string; total: number }[];
+  const rawTopRows = db.query("SELECT app, SUM(watts) AS total FROM sample_app_totals WHERE ts >= ? GROUP BY app ORDER BY total DESC").all(since) as { app: string; total: number }[];
   const totals = new Map<string, number>();
   for (const r of rawTopRows) {
     const app = normalizeStoredApp(r.app);
@@ -950,7 +980,7 @@ function apiSeries(url: URL) {
   const bySample = new Map(points.map((p) => [p.sampleId, p]));
   let otherTotal = 0;
 
-  const aggRows = db.query(`SELECT sample_id, app, SUM(estimated_watts) AS watts FROM (${processRowsViewSql}) WHERE ts > ? GROUP BY sample_id, app ORDER BY sample_id`).all(pointsSince) as { sample_id: number; app: string; watts: number }[];
+  const aggRows = db.query("SELECT sample_id, app, watts FROM sample_app_totals WHERE ts > ? ORDER BY sample_id").all(pointsSince) as { sample_id: number; app: string; watts: number }[];
   for (const r of aggRows) {
     const p = bySample.get(r.sample_id);
     if (!p) continue;
@@ -1140,6 +1170,8 @@ function clamp(n: number, min: number, max: number) {
 }
 function fmtW(w: number | null | undefined) { return w == null ? "?W" : `${w.toFixed(2)}W`; }
 function fmtPct(p: number | null | undefined) { return p == null ? "?%" : `${p.toFixed(1)}%`; }
+
+backfillSampleAppTotals();
 
 console.log(`[battery-monitor] db=${dbPath}`);
 console.log(`[battery-monitor] polling every ${cfg.pollMs / 1000}s; proc=${cfg.procRoot}; power=${cfg.powerRoot}; self pid=${selfPid}`);

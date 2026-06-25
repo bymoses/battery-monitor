@@ -97,6 +97,7 @@ Tables:
 - `process_samples` legacy denormalized rows, pruned by retention
 - `process_identities` process/app/cmd text stored once
 - `process_samples_v2` compact per-sample numeric process rows
+- `sample_app_totals` pre-aggregated app watts per sample for fast timeline queries
 - `environment_samples`
 - `sleep_events` suspend/sample gap intervals with average sleep charge/discharge rate
 
