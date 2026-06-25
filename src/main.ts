@@ -105,6 +105,7 @@ const cfg = {
   baselineLookbackHours: numEnv("BASELINE_LOOKBACK_HOURS", 24),
   hostConfigDir: env("HOST_CONFIG_DIR", "/host/config"),
   focusedWindowFile: env("FOCUSED_WINDOW_FILE", "/data/focused-window.json"),
+  desktopStateFile: env("DESKTOP_STATE_FILE", "/data/desktop-state.json"),
   suspendGapMs: intEnv("SUSPEND_GAP_SECONDS", 120) * 1000,
   videoRxMbpsThreshold: numEnv("VIDEO_RX_MBPS_THRESHOLD", 1),
   maxProcessesPerSample: intEnv("MAX_PROCESSES_PER_SAMPLE", 0),
@@ -445,6 +446,17 @@ function readFocusedWindow(): { app: string; title: string; pid: number | null }
 }
 
 function readTheme(): { theme: string; detail: string } {
+  const helper = safeReadTrim(cfg.desktopStateFile);
+  if (helper) {
+    try {
+      const state = JSON.parse(helper) as { theme?: unknown; detail?: unknown; color_scheme?: unknown; gtk_theme?: unknown };
+      const theme = String(state.theme ?? "").toLowerCase();
+      if (theme === "light" || theme === "dark") return { theme, detail: String(state.detail ?? state.color_scheme ?? state.gtk_theme ?? "desktop helper") };
+    } catch {
+      // Ignore malformed helper state and fall back to config files.
+    }
+  }
+
   const checks = [
     path.join(cfg.hostConfigDir, "gtk-3.0", "settings.ini"),
     path.join(cfg.hostConfigDir, "gtk-4.0", "settings.ini"),

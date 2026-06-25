@@ -62,29 +62,29 @@ Important environment variables in `compose.yml`:
 | `RETENTION_DAYS` | `14` | Deletes older samples hourly. |
 | `FORCE_COLLECT` | `false` | Useful on desktops or for testing without battery. |
 
-## Focused window tracking
+## System helper
 
-Wayland does not expose focused windows generically to containers. For niri, run this tiny host helper in your user session:
+Wayland/session state is not exposed cleanly to containers. For niri, run the host-side system helper in your user session:
 
 ```bash
 cd /home/user/workspace/bms/devices/battery-monitor
-./scripts/focused-window-niri.sh
+./scripts/battery-monitor-system-helper.sh
 ```
 
-It writes `data/focused-window.json`; the Docker service imports it on the next 30s poll.
+It writes small JSON files such as `data/focused-window.json` and `data/desktop-state.json`; the Docker service imports them on the next poll.
 
 To auto-start it on login, install the user systemd service:
 
 ```bash
-./scripts/install-focused-window-service.sh
+./scripts/install-system-helper-service.sh
 ```
 
 Useful commands:
 
 ```bash
-systemctl --user status battery-monitor-focused-window.service
-systemctl --user restart battery-monitor-focused-window.service
-systemctl --user disable --now battery-monitor-focused-window.service
+systemctl --user status battery-monitor-system-helper.service
+systemctl --user restart battery-monitor-system-helper.service
+systemctl --user disable --now battery-monitor-system-helper.service
 ```
 
 ## Data

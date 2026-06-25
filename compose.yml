@@ -27,6 +27,7 @@ services:
       BASELINE_LOOKBACK_HOURS: "24"
       HOST_CONFIG_DIR: "/host/config"
       FOCUSED_WINDOW_FILE: "/data/focused-window.json"
+      DESKTOP_STATE_FILE: "/data/desktop-state.json"
       # Any interval longer than this is treated as suspend/sample gap.
       SUSPEND_GAP_SECONDS: "120"
       VIDEO_RX_MBPS_THRESHOLD: "1"
