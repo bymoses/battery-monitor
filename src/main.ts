@@ -76,6 +76,10 @@ type SeriesBatteryRow = {
   brightness_source: string | null;
   theme: string | null;
   theme_detail: string | null;
+  video_streaming: number | null;
+  video_detail: string | null;
+  net_rx_mbps: number | null;
+  net_tx_mbps: number | null;
 };
 
 type ProcPrev = Pick<ProcNow, "ticks" | "startTime" | "readBytes" | "writeBytes">;
@@ -1133,14 +1137,14 @@ function apiSeries(url: URL) {
 
   let batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,
       e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail,
-      e.brightness_percent,e.brightness_source,e.theme,e.theme_detail
+      e.brightness_percent,e.brightness_source,e.theme,e.theme_detail,e.video_streaming,e.video_detail,e.net_rx_mbps,e.net_tx_mbps
     FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
     WHERE b.ts > ? ORDER BY b.ts`).all(pointsSince) as SeriesBatteryRow[];
   let dropFirstPoint = false;
   if (afterTs != null && batteryRows.length > 0) {
     const prevRow = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,
         e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail,
-        e.brightness_percent,e.brightness_source,e.theme,e.theme_detail
+        e.brightness_percent,e.brightness_source,e.theme,e.theme_detail,e.video_streaming,e.video_detail,e.net_rx_mbps,e.net_tx_mbps
       FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
       WHERE b.ts <= ? ORDER BY b.ts DESC LIMIT 1`).get(afterTs) as SeriesBatteryRow | null;
     if (prevRow) {
@@ -1150,7 +1154,7 @@ function apiSeries(url: URL) {
   } else if (afterTs == null) {
     batteryRows = db.query(`SELECT b.id,b.ts,b.capacity,b.power_w,b.on_battery,b.status,
         e.focused_app,e.focused_title,e.focused_pid,e.lid_closed,e.lid_detail,e.screen_locked,e.screen_lock_detail,
-        e.brightness_percent,e.brightness_source,e.theme,e.theme_detail
+        e.brightness_percent,e.brightness_source,e.theme,e.theme_detail,e.video_streaming,e.video_detail,e.net_rx_mbps,e.net_tx_mbps
       FROM battery_samples b LEFT JOIN environment_samples e ON e.sample_id=b.id
       WHERE b.ts >= ? ORDER BY b.ts`).all(since) as SeriesBatteryRow[];
   }
@@ -1184,6 +1188,10 @@ function apiSeries(url: URL) {
       brightnessSource: b.brightness_source ?? "",
       theme: b.theme ?? "unknown",
       themeDetail: b.theme_detail ?? "",
+      videoStreaming: b.video_streaming == null ? null : Boolean(b.video_streaming),
+      videoDetail: b.video_detail ?? "",
+      netRxMbps: b.net_rx_mbps ?? null,
+      netTxMbps: b.net_tx_mbps ?? null,
       apps: {} as Record<string, number>,
     };
   });

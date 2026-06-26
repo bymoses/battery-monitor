@@ -25,7 +25,7 @@ Open: <http://127.0.0.1:3033>
 - Has a `Groups` tab with aggregated per-group usage and expandable subprocess contribution.
 - Shows focused-window history as a compact timeline strip; hover reveals the title at that moment. Sleep gaps do not show stale focused windows.
 - Tracks lid closed state and common lock-screen processes while the machine is awake.
-- Shows a brightness/theme timeline chart with theme switch bands and brightness percentage on hover.
+- Shows brightness/theme and video-streaming timeline mini charts with detailed hover context.
 - Time labels are frontend-configurable; default display timezone is UTC+3 and can be changed in the toolbar.
 - Keeps an explicit adaptive `System / baseline` row so idle/platform watts are not blamed on apps.
 - Captures screen/theme/media context: brightness, light/dark theme, fan RPM when exposed by the kernel, audio playback state, network rate, probable browser video streaming, and optional focused-window metadata.

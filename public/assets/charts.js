@@ -17,7 +17,7 @@ export function drawCharts() {
 
 export function setupTimelineHover() {
   tip = document.getElementById('tip');
-  for (const id of ['chart', 'rateChart', 'brightnessChart', 'focusChart']) {
+  for (const id of ['chart', 'rateChart', 'brightnessChart', 'videoChart', 'focusChart']) {
     document.getElementById(id).addEventListener('mousemove', handleTimelineHover);
     document.getElementById(id).addEventListener('mouseleave', clearTimelineHover);
   }
@@ -33,7 +33,7 @@ function drawMainChart() {
   ctx.clearRect(0,0,w,h);
   ctx.fillStyle = '#0d1424'; ctx.fillRect(0,0,w,h);
   if (!series || !series.points || series.points.length < 2) {
-    ctx.fillStyle='#94a3b8'; ctx.fillText('Waiting for at least two samples…', 20, 30); drawRateChart(); drawBrightnessChart(); drawFocusChart(); return;
+    ctx.fillStyle='#94a3b8'; ctx.fillText('Waiting for at least two samples…', 20, 30); drawRateChart(); drawBrightnessChart(); drawVideoChart(); drawFocusChart(); return;
   }
   const pts = series.points, apps = series.apps;
   const t0 = pts[0].ts, t1 = pts[pts.length-1].ts;
@@ -61,6 +61,7 @@ function drawMainChart() {
   drawHoverLine(ctx, x, padT, h-padB);
   drawRateChart();
   drawBrightnessChart();
+  drawVideoChart();
   drawFocusChart();
 }
 
@@ -158,6 +159,39 @@ function drawThemeBands(ctx, pts, x, y1, y2) {
     ctx.fillStyle = theme.includes('light') ? 'rgba(250,204,21,0.10)' : 'rgba(59,130,246,0.08)';
     ctx.fillRect(x(p.ts), y1, Math.max(1, x(next.ts) - x(p.ts)), y2 - y1);
   }
+}
+
+function drawVideoChart() {
+  const canvas = document.getElementById('videoChart');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(600, rect.width * dpr); canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height, padL = 52, padR = 46, padT = 12, padB = 20;
+  ctx.clearRect(0,0,w,h); ctx.fillStyle = '#0d1424'; ctx.fillRect(0,0,w,h);
+  if (!series || !series.points || series.points.length < 2) return;
+  const pts = series.points, t0 = pts[0].ts, t1 = pts[pts.length-1].ts;
+  const x = ts => padL + (ts - t0) / Math.max(1, t1 - t0) * (w - padL - padR);
+  drawSleepBands(ctx, x, padT, h-padB);
+  ctx.fillStyle = '#cbd5e1'; ctx.font = '11px system-ui'; ctx.fillText('video streaming heuristic', padL, 12);
+  const barY = padT + 16, barH = Math.max(12, h - padT - padB - 18);
+  ctx.strokeStyle = '#233044'; ctx.lineWidth = 1;
+  ctx.strokeRect(padL, barY, w - padL - padR, barH);
+  for (let i=0;i<pts.length-1;i++) {
+    const p = pts[i], next = pts[i+1];
+    if (next.gapBefore) continue;
+    const sx = x(p.ts), width = Math.max(1, x(next.ts) - sx);
+    if (p.videoStreaming === true) {
+      ctx.fillStyle = 'rgba(34,211,238,0.72)';
+      ctx.fillRect(sx, barY, width, barH);
+    } else if (p.videoStreaming === false) {
+      ctx.fillStyle = 'rgba(51,65,85,0.58)';
+      ctx.fillRect(sx, barY, width, barH);
+    }
+  }
+  ctx.fillStyle = '#22d3ee'; ctx.font = '11px system-ui'; ctx.fillText('streaming', padL + 6, barY + barH - 4);
+  ctx.fillStyle = '#94a3b8'; ctx.fillText('off/unknown', padL + 84, barY + barH - 4);
+  drawHoverLine(ctx, x, padT, h-padB);
 }
 
 function drawFocusChart() {
@@ -323,10 +357,11 @@ function handleTimelineHover(ev) {
   const sleepText = sleep ? '<br><b style="color:#fbbf24">'+escapeHtml(sleep.kind || 'sleep gap')+': '+fmtDuration(Number(sleep.duration_sec)/3600)+', avg '+(sleep.avg_power_w == null ? '?' : Math.abs(Number(sleep.avg_power_w)).toFixed(2)+'W')+', '+(sleep.avg_percent_per_hour == null ? '?' : Number(sleep.avg_percent_per_hour).toFixed(2)+'%/h')+'</b>' : '';
   const stateText = [p.lidClosed ? 'lid closed' : '', p.screenLocked ? 'screen locked' : ''].filter(Boolean).join(' / ');
   const brightnessText = p.brightnessPercent == null ? '' : '<br>brightness: '+fmtPct(p.brightnessPercent)+' / theme: '+escapeHtml(p.theme || 'unknown');
+  const videoText = p.videoStreaming == null ? '' : '<br>video: '+(p.videoStreaming ? '<b style="color:#22d3ee">streaming?</b>' : 'no') + (p.netRxMbps == null ? '' : ' / rx '+Number(p.netRxMbps).toFixed(2)+' Mbps') + (p.videoDetail ? '<br>'+escapeHtml(p.videoDetail) : '');
   const focusedText = sleep ? '' : (stateText ? '<br><b>'+escapeHtml(stateText)+'</b>' : '') + (p.focusedApp || p.focusedTitle ? '<br><b>focused: '+escapeHtml(p.focusedApp || 'unknown')+'</b>' + (p.focusedTitle ? '<br>'+escapeHtml(p.focusedTitle) : '') : '');
   tip.innerHTML = '<b>'+fmtDateTime(hoverTs)+'</b><br>' +
     (sleep ? 'no process samples during sleep/gap<br>nearest battery sample: ' : '') +
-    'battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + brightnessText + sleepText + focusedText +
+    'battery '+fmtPct(p.batteryPercent)+' / '+escapeHtml(p.status || '')+' / draw '+fmtW(p.totalWatts)+rateText + brightnessText + videoText + sleepText + focusedText +
     (hovered ? '<br><b style="color:#fbbf24">hover: '+escapeHtml(hovered)+'</b>' : '') + '<br>' +
     (lines.length ? lines.map(([a,v]) => (a === hovered ? '<b style="color:#fbbf24">▸ '+escapeHtml(a)+': '+fmtW(v)+'</b>' : escapeHtml(a)+': '+fmtW(v))).join('<br>') : '<span class="muted">gap interval</span>');
 }
