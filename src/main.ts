@@ -403,7 +403,8 @@ function detectVideoStreaming(input: {
   if (input.netRxMbps >= cfg.videoRxMbpsThreshold && browserActive) reasons.push(`${input.netRxMbps.toFixed(2)} Mbps RX + browser activity`);
   if (browserFocused && videoTitle && browserBusy) reasons.push(`video page title + busy browser (${input.browserWatts.toFixed(2)} W, ${input.browserCpu.toFixed(1)}% CPU)`);
   if (browserFocused && videoTitle && input.audioPlaying === true && browserActive) reasons.push(`video page title + audio playing`);
-  if (input.browserAudioPlaying === true && browserBusy) reasons.push(`browser audio + busy browser (${input.browserWatts.toFixed(2)} W, ${input.browserCpu.toFixed(1)}% CPU)`);
+  // Browser audio sinks can stay RUNNING even when playback is paused, so do not
+  // classify browser audio + CPU alone as video without a video-page/window hint.
 
   const streaming = reasons.length > 0;
   const titleHint = videoTitle ? `; title=${input.focused.title.slice(0, 90)}` : "";
