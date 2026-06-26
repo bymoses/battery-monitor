@@ -41,10 +41,48 @@ write_focused_window() {
   fi
 }
 
+read_audio_state_json() {
+  if ! command -v pactl >/dev/null 2>&1; then
+    printf '{"playing":null,"browser_playing":null,"apps":[],"media":[],"detail":"pactl not found"}'
+    return
+  fi
+  pactl -f json list sink-inputs 2>/dev/null | python3 -c '
+import json, re, sys
+try:
+    inputs = json.load(sys.stdin)
+except Exception as exc:
+    print(json.dumps({"playing": None, "browser_playing": None, "apps": [], "media": [], "detail": f"pactl parse failed: {exc}"}))
+    raise SystemExit
+active = [i for i in inputs if not i.get("corked") and not i.get("mute")]
+apps, media = [], []
+browser_playing = False
+for item in active:
+    props = item.get("properties") or {}
+    app = str(props.get("application.name") or "")
+    binary = str(props.get("application.process.binary") or "")
+    name = str(props.get("media.name") or props.get("node.name") or "")
+    if app and app not in apps:
+        apps.append(app)
+    if name and name not in media:
+        media.append(name)
+    text = f"{app} {binary} {name}".lower()
+    if re.search(r"\b(zen|firefox|chrome|chromium|brave|vivaldi|edge|browser)\b", text):
+        browser_playing = True
+print(json.dumps({
+    "playing": bool(active),
+    "browser_playing": browser_playing,
+    "apps": apps[:8],
+    "media": media[:8],
+    "detail": ", ".join([*(apps[:3] or ["no active audio"]), *(media[:3])]),
+}))
+' 2>/dev/null || printf '{"playing":null,"browser_playing":null,"apps":[],"media":[],"detail":"pactl failed"}'
+}
+
 write_desktop_state() {
-  local color_scheme gtk_theme theme detail
+  local color_scheme gtk_theme theme detail audio_state
   color_scheme="$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || true)"
   gtk_theme="$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)"
+  audio_state="$(read_audio_state_json)"
 
   case "${color_scheme,,} ${gtk_theme,,}" in
     *prefer-light*|*light*) theme="light" ;;
@@ -53,11 +91,12 @@ write_desktop_state() {
   esac
 
   detail="gsettings color-scheme=${color_scheme:-unknown}; gtk-theme=${gtk_theme:-unknown}"
-  printf '{"theme":%s,"detail":%s,"color_scheme":%s,"gtk_theme":%s,"ts":%s}\n' \
+  printf '{"theme":%s,"detail":%s,"color_scheme":%s,"gtk_theme":%s,"audio":%s,"ts":%s}\n' \
     "$(printf '%s' "$theme" | json_escape)" \
     "$(printf '%s' "$detail" | json_escape)" \
     "$(printf '%s' "$color_scheme" | json_escape)" \
     "$(printf '%s' "$gtk_theme" | json_escape)" \
+    "$audio_state" \
     "$(date +%s%3N)" | atomic_write "$DESKTOP_OUT"
 }
 

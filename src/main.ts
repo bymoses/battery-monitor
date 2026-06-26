@@ -341,7 +341,13 @@ function readBattery(ts: number): BatterySample {
 function readEnvironment(sampleId: number, ts: number, rows: ProcRow[]): EnvironmentSample {
   const theme = readTheme();
   const brightness = readBrightness();
-  const audio = readAudioState();
+  const procAudio = readAudioState();
+  const helperAudio = readDesktopAudioState();
+  const audio = {
+    playing: procAudio.playing === true || helperAudio.playing === true ? true : (procAudio.playing ?? helperAudio.playing),
+    browserPlaying: helperAudio.browserPlaying,
+    detail: `${procAudio.detail}; helper: ${helperAudio.detail}`,
+  };
   const net = readNetworkRates(ts);
   const focused = readFocusedWindow();
   const lid = readLidState();
@@ -353,11 +359,7 @@ function readEnvironment(sampleId: number, ts: number, rows: ProcRow[]): Environ
   const browserCpu = rows
     .filter((r) => ["Zen Browser", "Firefox", "Chrome/Chromium"].includes(r.app))
     .reduce((sum, r) => sum + r.cpuPercent, 0);
-  const browserActive = browserWatts > 0.3 || browserCpu > 5;
-  const videoStreaming = net.rxMbps >= cfg.videoRxMbpsThreshold && browserActive;
-  const videoDetail = videoStreaming
-    ? `probable: ${net.rxMbps.toFixed(2)} Mbps RX + browser activity (${browserWatts.toFixed(2)} W, ${browserCpu.toFixed(1)}% CPU)`
-    : `not detected: ${net.rxMbps.toFixed(2)} Mbps RX; browser ${browserWatts.toFixed(2)} W, ${browserCpu.toFixed(1)}% CPU`;
+  const video = detectVideoStreaming({ netRxMbps: net.rxMbps, browserWatts, browserCpu, focused, audioPlaying: audio.playing, browserAudioPlaying: audio.browserPlaying });
 
   return {
     sampleId,
@@ -368,8 +370,8 @@ function readEnvironment(sampleId: number, ts: number, rows: ProcRow[]): Environ
     brightnessSource: brightness.source,
     audioPlaying: audio.playing,
     audioDetail: audio.detail,
-    videoStreaming,
-    videoDetail,
+    videoStreaming: video.streaming,
+    videoDetail: video.detail,
     netRxMbps: net.rxMbps,
     netTxMbps: net.txMbps,
     focusedApp: focused.app,
@@ -382,6 +384,47 @@ function readEnvironment(sampleId: number, ts: number, rows: ProcRow[]): Environ
     fanRpm: fan.rpm,
     fanSource: fan.source,
   };
+}
+
+function detectVideoStreaming(input: {
+  netRxMbps: number;
+  browserWatts: number;
+  browserCpu: number;
+  focused: { app: string; title: string; pid: number | null };
+  audioPlaying: boolean | null;
+  browserAudioPlaying: boolean | null;
+}): { streaming: boolean; detail: string } {
+  const browserActive = input.browserWatts > 0.3 || input.browserCpu > 5;
+  const browserBusy = input.browserWatts > 1.0 || input.browserCpu > 15;
+  const browserFocused = isBrowserLike(input.focused.app, input.focused.title);
+  const videoTitle = isVideoLikeTitle(input.focused.title);
+  const reasons: string[] = [];
+
+  if (input.netRxMbps >= cfg.videoRxMbpsThreshold && browserActive) reasons.push(`${input.netRxMbps.toFixed(2)} Mbps RX + browser activity`);
+  if (browserFocused && videoTitle && browserBusy) reasons.push(`video page title + busy browser (${input.browserWatts.toFixed(2)} W, ${input.browserCpu.toFixed(1)}% CPU)`);
+  if (browserFocused && videoTitle && input.audioPlaying === true && browserActive) reasons.push(`video page title + audio playing`);
+  if (input.browserAudioPlaying === true && browserBusy) reasons.push(`browser audio + busy browser (${input.browserWatts.toFixed(2)} W, ${input.browserCpu.toFixed(1)}% CPU)`);
+
+  const streaming = reasons.length > 0;
+  const titleHint = videoTitle ? `; title=${input.focused.title.slice(0, 90)}` : "";
+  const audioHint = input.audioPlaying == null ? "unknown" : input.audioPlaying ? "playing" : "idle";
+  const browserAudioHint = input.browserAudioPlaying == null ? "unknown" : input.browserAudioPlaying ? "playing" : "idle";
+  const base = `${input.netRxMbps.toFixed(2)} Mbps RX; browser ${input.browserWatts.toFixed(2)} W, ${input.browserCpu.toFixed(1)}% CPU; audio ${audioHint}; browser audio ${browserAudioHint}${titleHint}`;
+  return streaming
+    ? { streaming: true, detail: `probable: ${reasons.join("; ")} (${base})` }
+    : { streaming: false, detail: `not detected: ${base}` };
+}
+
+function isBrowserLike(app: string, title: string): boolean {
+  const text = `${app} ${title}`.toLowerCase();
+  return /\b(zen|firefox|chrome|chromium|brave|vivaldi|edge|browser)\b/.test(text);
+}
+
+function isVideoLikeTitle(title: string): boolean {
+  const t = title.toLowerCase();
+  if (!t) return false;
+  return /\b(youtube|youtu\.be|twitch|netflix|vimeo|rumble|odysee|nebula|peertube|hulu|disney\+|prime video|hbo|max|peacock|dailymotion|bilibili)\b/.test(t)
+    || /\b(watch|stream|live|episode|season|movie|trailer|playlist)\b/.test(t);
 }
 
 function readLidState(): { closed: boolean | null; detail: string } {
@@ -449,16 +492,21 @@ function readFocusedWindow(): { app: string; title: string; pid: number | null }
   }
 }
 
-function readTheme(): { theme: string; detail: string } {
+function readDesktopState(): Record<string, unknown> | null {
   const helper = safeReadTrim(cfg.desktopStateFile);
-  if (helper) {
-    try {
-      const state = JSON.parse(helper) as { theme?: unknown; detail?: unknown; color_scheme?: unknown; gtk_theme?: unknown };
-      const theme = String(state.theme ?? "").toLowerCase();
-      if (theme === "light" || theme === "dark") return { theme, detail: String(state.detail ?? state.color_scheme ?? state.gtk_theme ?? "desktop helper") };
-    } catch {
-      // Ignore malformed helper state and fall back to config files.
-    }
+  if (!helper) return null;
+  try {
+    return JSON.parse(helper) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function readTheme(): { theme: string; detail: string } {
+  const state = readDesktopState();
+  if (state) {
+    const theme = String(state.theme ?? "").toLowerCase();
+    if (theme === "light" || theme === "dark") return { theme, detail: String(state.detail ?? state.color_scheme ?? state.gtk_theme ?? "desktop helper") };
   }
 
   const checks = [
@@ -478,6 +526,15 @@ function readTheme(): { theme: string; detail: string } {
     if (themeLine?.includes("light")) return { theme: "light", detail: `${base}: ${themeLine.slice(0, 80)}` };
   }
   return { theme: "unknown", detail: `no readable theme config in ${cfg.hostConfigDir}` };
+}
+
+function readDesktopAudioState(): { playing: boolean | null; browserPlaying: boolean | null; detail: string } {
+  const state = readDesktopState();
+  const audio = state?.audio as Record<string, unknown> | undefined;
+  if (!audio) return { playing: null, browserPlaying: null, detail: "no helper audio state" };
+  const playing = typeof audio.playing === "boolean" ? audio.playing : null;
+  const browserPlaying = typeof audio.browser_playing === "boolean" ? audio.browser_playing : null;
+  return { playing, browserPlaying, detail: String(audio.detail ?? "system helper audio") };
 }
 
 function readBrightness(): { percent: number | null; source: string } {

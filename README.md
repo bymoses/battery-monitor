@@ -71,7 +71,7 @@ cd /home/user/workspace/bms/devices/battery-monitor
 ./scripts/battery-monitor-system-helper.sh
 ```
 
-It writes small JSON files such as `data/focused-window.json` and `data/desktop-state.json`; the Docker service imports them on the next poll.
+It writes small JSON files such as `data/focused-window.json` and `data/desktop-state.json`; the Docker service imports them on the next poll. The desktop state also includes host audio stream metadata used by the video-streaming heuristic.
 
 To auto-start it on login, install the user systemd service:
 
