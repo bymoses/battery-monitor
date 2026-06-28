@@ -35,6 +35,27 @@ fn file_size(path: &PathBuf) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+fn normalize_focused_app_for_series(raw: &str, apps: &[String]) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let normalized = normalize_stored_app(trimmed);
+    let lower = normalized.to_lowercase();
+    if let Some(app) = apps.iter().find(|app| app.to_lowercase() == lower) {
+        return app.clone();
+    }
+    if let Some(app) = apps.iter().find(|app| {
+        let candidate = app.to_lowercase();
+        candidate.len() >= 3 && (lower.contains(&candidate) || candidate.contains(&lower))
+    }) {
+        return app.clone();
+    }
+
+    normalized
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Collector {
     pub(crate) self_pid: i32,
@@ -518,7 +539,7 @@ impl App {
                 "onBattery": b.on_battery != 0,
                 "charging": b.on_battery == 0 && b.status.to_lowercase().contains("charging"),
                 "status": b.status,
-                "focusedApp": b.focused_app.clone().unwrap_or_default(),
+                "focusedApp": normalize_focused_app_for_series(b.focused_app.as_deref().unwrap_or_default(), &apps),
                 "focusedTitle": b.focused_title.clone().unwrap_or_default(),
                 "focusedPid": b.focused_pid,
                 "lidClosed": opt_bool(b.lid_closed),

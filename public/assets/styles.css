@@ -63,7 +63,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); -webkit-font-smoothi
   filter: blur(34px); opacity: .9;
 }
 
-.shell { position: relative; z-index: 1; display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 24px; align-items: start; max-width: 1320px; margin: 0 auto; padding: 24px; }
+.shell { position: relative; z-index: 1; display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 24px; align-items: start; max-width: 1600px; margin: 0 auto; padding: 24px; }
 
 /* ---------- Vitals rail ---------- */
 .rail {
@@ -149,11 +149,11 @@ body { margin: 0; background: var(--bg); color: var(--ink); -webkit-font-smoothi
 
 /* ---------- Working stage ---------- */
 .stage { min-width: 0; padding: 0 0 56px; }
-.stage-bar { position: relative; overflow: hidden; z-index: 3; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; padding: 40px; margin-bottom: 24px; background: color-mix(in srgb, var(--surface) 88%, transparent); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 1px rgba(0,0,0,.04); backdrop-filter: blur(18px); }
-.stage-bar::before { content: "Power telemetry"; position: absolute; top: 24px; left: 40px; color: var(--ink-faint); font-family: var(--font-mono); font-size: 12px; line-height: 16px; text-transform: uppercase; }
-.stage-bar::after { content: ""; position: absolute; right: -80px; top: -120px; width: 420px; height: 280px; background: radial-gradient(circle at 20% 40%, #00dfd866, transparent 35%), radial-gradient(circle at 54% 34%, #007cf066, transparent 34%), radial-gradient(circle at 78% 55%, #ff00804d, transparent 36%), radial-gradient(circle at 56% 85%, #f9cb2840, transparent 35%); filter: blur(24px); opacity: .78; z-index: -1; }
-.stage-head { display: flex; flex-direction: column; gap: 14px; padding-top: 20px; }
-.stage-head h1 { margin: 0; max-width: 640px; font-size: clamp(38px, 5vw, 64px); line-height: .98; font-weight: 600; letter-spacing: -2.4px; }
+.stage-bar { position: relative; overflow: hidden; z-index: 3; display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; padding: 28px 32px; margin-bottom: 18px; background: color-mix(in srgb, var(--surface) 88%, transparent); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 1px rgba(0,0,0,.04); backdrop-filter: blur(18px); }
+.stage-bar::before { content: "Power telemetry"; position: absolute; top: 18px; left: 32px; color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; line-height: 14px; text-transform: uppercase; }
+.stage-bar::after { content: ""; position: absolute; right: -80px; top: -130px; width: 380px; height: 240px; background: radial-gradient(circle at 20% 40%, #00dfd866, transparent 35%), radial-gradient(circle at 54% 34%, #007cf066, transparent 34%), radial-gradient(circle at 78% 55%, #ff00804d, transparent 36%), radial-gradient(circle at 56% 85%, #f9cb2840, transparent 35%); filter: blur(24px); opacity: .78; z-index: -1; }
+.stage-head { display: flex; flex-direction: column; gap: 10px; padding-top: 18px; }
+.stage-head h1 { margin: 0; max-width: 560px; font-size: clamp(34px, 4vw, 52px); line-height: .98; font-weight: 600; letter-spacing: -2px; }
 .live { width: fit-content; display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 #0070f366; animation: pulse 2s ease-out infinite; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 #0070f366; } 70% { box-shadow: 0 0 0 8px #0070f300; } 100% { box-shadow: 0 0 0 0 #0070f300; } }
@@ -300,15 +300,15 @@ tbody tr:hover { background: var(--table-hover); }
   .telem { flex: 1 1 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .rail-bottom { margin-top: 0; flex: 1 1 100%; }
   .rail-foot { display: none; }
-  .stage-bar { padding: 32px 24px; }
-  .stage-bar::before { left: 24px; }
+  .stage-bar { padding: 28px 24px 24px; }
+  .stage-bar::before { left: 24px; top: 16px; }
 }
 @media (max-width: 640px) {
   .shell { padding: 10px; }
   .rail { padding: 16px; border-radius: 12px; }
   .vitals, .telem { grid-template-columns: 1fr; }
-  .stage-bar { padding: 32px 18px 20px; border-radius: 12px; }
-  .stage-head h1 { font-size: 40px; letter-spacing: -1.8px; }
+  .stage-bar { padding: 28px 18px 18px; border-radius: 12px; }
+  .stage-head h1 { font-size: 36px; letter-spacing: -1.4px; }
   #chart { height: 440px; }
   .tip-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .panel { padding: 16px; }

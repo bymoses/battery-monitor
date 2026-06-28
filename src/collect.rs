@@ -516,7 +516,7 @@ pub(crate) fn subprocess_label(name: &str, cmd: &str) -> String {
     nonempty(first_word(cmd)).unwrap_or_else(|| name.into())
 }
 pub(crate) fn normalize_stored_app(app: &str) -> String {
-    if ["zen-bin", "Isolated Web Co", "Isolated Servic", "Web Content", "WebExtensions", "Socket Process", "Privileged Cont", "forkserver"].contains(&app) { return "Zen Browser".into(); }
+    if ["zen", "zen-bin", "Isolated Web Co", "Isolated Servic", "Web Content", "WebExtensions", "Socket Process", "Privileged Cont", "forkserver"].contains(&app) { return "Zen Browser".into(); }
     if ["containerd", "containerd-shim", "dockerd", "docker", "runc", "docker-proxy"].contains(&app) { return "Docker".into(); }
     if app.starts_with("kworker") { return "Kernel workers".into(); }
     app.to_string()

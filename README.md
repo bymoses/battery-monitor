@@ -1,6 +1,8 @@
-# Battery Monitor
+# bms-watchdog
 
 Rust/Tokio local battery and process monitor. The runtime is a single host binary; Docker is only used to run Cargo/Rust tooling during development.
+
+![Dashboard screenshot](docs/assets/dashboard.png)
 
 ## Build/check
 

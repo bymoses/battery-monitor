@@ -372,13 +372,33 @@ function focusSegmentLabel(point) {
   if (!point) return 'unknown';
   if (point.lidClosed) return 'lid closed';
   if (point.screenLocked) return 'locked';
-  return point.focusedApp || 'unknown';
+  return normalizeFocusedApp(point.focusedApp || 'unknown');
 }
+
+function normalizeFocusedApp(app) {
+  const raw = String(app || 'unknown').trim();
+  const lower = raw.toLowerCase();
+  if (!raw || lower === 'unknown') return 'unknown';
+  const apps = series?.apps || [];
+  const exact = apps.find(a => a.toLowerCase() === lower);
+  if (exact) return exact;
+  const fuzzy = apps.find(a => {
+    const candidate = a.toLowerCase();
+    return lower.length >= 3 && (candidate.includes(lower) || lower.includes(candidate));
+  });
+  if (fuzzy) return fuzzy;
+  if (lower === 'zen' || lower.includes('zen-bin')) return 'Zen Browser';
+  if (lower.includes('firefox')) return 'Firefox';
+  if (lower.includes('chrom')) return 'Chrome/Chromium';
+  return raw;
+}
+
 function focusColor(app) {
-  if (!app) return cssVar('--chart-muted', '#8f8f8f');
+  if (!app || app === 'unknown') return cssVar('--chart-muted', '#8f8f8f');
   if (app === 'locked') return cssVar('--amber', '#f5a623') + 'aa';
   if (app === 'lid closed') return cssVar('--chart-axis', '#a1a1a1') + 'aa';
-  return colors[Math.abs(hashString(app)) % colors.length] + 'aa';
+  const appIndex = (series?.apps || []).indexOf(app);
+  return colors[(appIndex >= 0 ? appIndex : Math.abs(hashString(app))) % colors.length] + 'aa';
 }
 function hashString(s) { let h = 0; for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0; return h; }
 
@@ -478,7 +498,7 @@ function tipTimestamp(ts) {
   const text = fmtDateTime(ts);
   const m = text.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s+(.+))?$/);
   if (!m) return escapeHtml(text);
-  return '<div class="tip-clock"><span class="tip-time">' + escapeHtml(m[2]) + '</span>' + (m[3] ? '<span class="tip-tz">' + escapeHtml(m[3]) + '</span>' : '') + '</div><div class="tip-date">' + escapeHtml(m[1]) + '</div>';
+  return '<div class="tip-clock"><span class="tip-time">' + escapeHtml(m[2]) + '</span></div><div class="tip-date">' + escapeHtml(m[1]) + '</div>';
 }
 function tipMetric(label, value, sub = '') { return '<div class="tip-metric"><span>' + escapeHtml(label) + '</span><b>' + value + '</b><small>' + sub + '</small></div>'; }
 function tipLine(label, value) { return '<div class="tip-line"><span>' + escapeHtml(label) + '</span><b>' + value + '</b></div>'; }
@@ -511,7 +531,6 @@ function renderTooltip(ev, p, sleep, apps) {
       tipLine('Theme', escapeHtml(p.theme || 'unknown')) +
       tipLine('Video', videoState) +
       tipLine('USB power', escapeHtml(usbText)) +
-      (p.usbPowerDetail ? '<div class="tip-detail">'+escapeHtml(p.usbPowerDetail)+'</div>' : '') +
     '</div>' +
     (sleep ? '<div class="tip-section"><div class="tip-section-title tip-warn">' + escapeHtml(sleep.kind || 'sleep gap') + '</div>' + tipLine('Duration', fmtDuration(Number(sleep.duration_sec) / 3600)) + tipLine('Average', sleepAvg) + '</div>' : '') +
     (!sleep && (stateText || p.focusedApp || p.focusedTitle) ? '<div class="tip-section"><div class="tip-section-title">Focus</div>' +
