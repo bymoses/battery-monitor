@@ -3,67 +3,116 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Battery Monitor</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='8' y='20' width='44' height='24' rx='4' fill='none' stroke='%23e5e7eb' stroke-width='4'/%3E%3Crect x='54' y='28' width='4' height='8' rx='1' fill='%23e5e7eb'/%3E%3Crect x='14' y='26' width='22' height='12' rx='1' fill='%23e5e7eb'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/assets/styles.css" />
-
+  <meta name="color-scheme" content="light dark" />
+  <title>bms · watchdog</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='8' y='20' width='44' height='24' rx='5' fill='none' stroke='%23171717' stroke-width='4'/%3E%3Crect x='54' y='27' width='5' height='10' rx='1.5' fill='%23171717'/%3E%3Crect x='14' y='26' width='24' height='12' rx='2' fill='%230070f3'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/assets/styles.css" />
 </head>
 <body>
-  <main>
-    <h1>Battery Monitor</h1>
-    <div class="muted">30s unplugged snapshots. Per-app watts are estimates from CPU + disk activity; this monitor is included as <b>battery-monitor</b>.</div>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-glow" aria-hidden="true"></div>
 
-    <section class="grid">
-      <div class="card"><div class="label">Battery</div><div class="value" id="battery">—</div><div class="muted" id="status">—</div></div>
-      <div class="card"><div class="label">System draw</div><div class="value" id="watts">—</div><div class="muted">from battery sensor</div></div>
-      <div class="card"><div class="label" id="rateLabel">Battery rate</div><div class="value" id="drain">—</div><div class="muted" id="lasts">estimating</div></div>
-      <div class="card"><div class="label">Last poll</div><div class="value" id="poll">—</div><div class="muted" id="samples">—</div></div>
-      <div class="card"><div class="label">Screen</div><div class="value" id="screen">—</div><div class="muted" id="theme">—</div></div>
-      <div class="card"><div class="label">Media</div><div class="value" id="media">—</div><div class="muted" id="network">—</div></div>
-      <div class="card"><div class="label">Fan</div><div class="value" id="fan">—</div><div class="muted" id="fanSource">sensor optional</div></div>
-      <div class="card"><div class="label">Focused window</div><div class="value" id="focusApp">—</div><div class="muted" id="focusTitle">optional helper</div></div>
-    </section>
-
-    <section class="panel">
-      <div class="toolbar">
-        <label>Range <select id="hours"><option>1</option><option>2</option><option>4</option><option selected>8</option><option>24</option><option>72</option></select> h</label>
-        <label>Top apps <select id="top"><option>8</option><option selected>12</option><option>20</option></select></label>
-        <label>TZ <select id="timezone"></select></label>
-        <button id="refresh">Refresh</button>
-        <span class="muted">Stacked area = estimated dynamic watts + baseline.</span>
+  <div class="shell">
+    <!-- Persistent vitals rail -->
+    <aside class="rail">
+      <div class="rail-brand">
+        <span class="brand-batt" aria-hidden="true"><i></i></span>
+        <span class="brand-text"><b>bms<span class="brand-dot">·</span>watchdog</b><small>power telemetry</small></span>
       </div>
-      <canvas id="chart"></canvas>
-      <canvas id="rateChart"></canvas>
-      <canvas id="brightnessChart"></canvas>
-      <canvas id="videoChart"></canvas>
-      <canvas id="focusChart"></canvas>
-      <div id="legend" style="margin-top: 10px"></div>
-    </section>
 
-    <div class="tabs">
-      <button class="tab active" data-tab="latestPanel">Latest process snapshot</button>
-      <button class="tab" data-tab="groupsPanel">Groups</button>
-    </div>
-
-    <section class="panel" id="latestPanel">
-      <h3 style="margin-top:0">Latest process snapshot</h3>
-      <div style="overflow:auto"><table>
-        <thead><tr><th>Group</th><th>PID</th><th>Watts est.</th><th>CPU %</th><th>IO MB</th><th>RSS MB</th><th>Command</th></tr></thead>
-        <tbody id="rows"></tbody>
-      </table></div>
-    </section>
-
-    <section class="panel hidden" id="groupsPanel">
-      <div class="toolbar">
-        <label>Range follows the same selector: <b><span id="groupHours">8</span>h</b></label>
-        <span class="muted">Aggregated estimated usage per group. Click a group to expand subprocess contribution.</span>
+      <div class="gauge" id="batteryGauge">
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="gauge-track" cx="60" cy="60" r="52" pathLength="100" />
+          <circle class="gauge-prog" cx="60" cy="60" r="52" pathLength="100" />
+        </svg>
+        <div class="gauge-center">
+          <div class="value" id="battery">—</div>
+          <div class="muted" id="status">—</div>
+        </div>
       </div>
-      <div style="overflow:auto"><table>
-        <thead><tr><th>Group / subprocess</th><th>Avg W</th><th>Wh est.</th><th>CPU sec</th><th>IO MB</th><th>RSS MB</th><th>Share</th></tr></thead>
-        <tbody id="groupRows"></tbody>
-      </table></div>
-    </section>
-  </main>
+
+      <div class="vitals">
+        <div class="vital">
+          <span class="vital-key"><span class="ico ico-bolt"></span>System draw</span>
+          <span class="value" id="watts">—</span>
+          <span class="muted">battery sensor</span>
+        </div>
+        <div class="vital">
+          <span class="vital-key"><span class="ico ico-rate"></span><span id="rateLabel">Battery rate</span></span>
+          <span class="value" id="drain">—</span>
+          <span class="muted" id="lasts">estimating</span>
+        </div>
+        <div class="vital">
+          <span class="vital-key"><span class="ico ico-clock"></span>Last poll</span>
+          <span class="value" id="poll">—</span>
+          <span class="muted" id="samples">—</span>
+        </div>
+      </div>
+
+      <div class="rail-divider"><span>environment</span></div>
+
+      <div class="telem">
+        <div class="telem-row"><span class="ico ico-screen"></span><div class="telem-body"><span class="telem-k">Screen</span><span class="telem-v" id="screen">—</span><span class="muted" id="theme">—</span></div></div>
+        <div class="telem-row"><span class="ico ico-media"></span><div class="telem-body"><span class="telem-k">Media</span><span class="telem-v" id="media">—</span><span class="muted" id="network">—</span></div></div>
+        <div class="telem-row"><span class="ico ico-focus"></span><div class="telem-body"><span class="telem-k">Focused</span><span class="telem-v" id="focusApp">—</span><span class="muted" id="focusTitle">optional helper</span></div></div>
+      </div>
+
+      <div class="rail-bottom">
+        <span class="field rail-tz"><span class="field-key">Timezone</span><select id="timezone"></select></span>
+        <div class="rail-foot">local-first · estimates from CPU + disk vs sensor draw</div>
+      </div>
+    </aside>
+
+    <!-- Working stage -->
+    <main class="stage">
+      <div class="stage-bar">
+        <div class="stage-head">
+          <h1>Power timeline</h1>
+          <div class="live"><span class="live-dot" aria-hidden="true"></span> live · 30s</div>
+        </div>
+        <div class="stage-controls">
+          <span class="field"><span class="field-key">Range</span><select id="hours"><option>1</option><option>2</option><option>4</option><option selected>8</option><option>24</option><option>72</option></select><span class="field-unit">h</span></span>
+          <span class="field"><span class="field-key">Top</span><select id="top"><option>8</option><option selected>12</option><option>20</option></select></span>
+          <button id="refresh"><span class="ico ico-refresh"></span>Refresh</button>
+        </div>
+      </div>
+
+      <section class="panel chart-panel">
+        <div class="lanes-bar">
+          <span class="lanes-key">Layers</span>
+          <button class="lane-chip" data-lane="rate">Rate</button>
+          <button class="lane-chip" data-lane="brightness">Brightness</button>
+          <button class="lane-chip" data-lane="video">Video</button>
+          <button class="lane-chip" data-lane="usb">USB power</button>
+          <button class="lane-chip" data-lane="focus">Focus</button>
+          <button id="zoomReset" class="lane-chip reset hidden">⤢ Reset zoom</button>
+          <span class="lanes-hint">drag to zoom · double-click resets</span>
+        </div>
+        <canvas id="chart"></canvas>
+        <div id="legend" class="legend"></div>
+      </section>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="latestPanel">Latest process snapshot</button>
+        <button class="tab" data-tab="groupsPanel">Groups</button>
+      </div>
+
+      <section class="panel" id="latestPanel">
+        <div class="table-wrap"><table>
+          <thead><tr><th>Group</th><th>PID</th><th class="num">Watts est.</th><th class="num">CPU %</th><th class="num">IO MB</th><th class="num">RSS MB</th><th>Command</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table></div>
+      </section>
+
+      <section class="panel hidden" id="groupsPanel">
+        <div class="panel-note">Range follows the selector above: <b><span id="groupHours">8</span>h</b> · aggregated estimated usage per group. Click a group to expand subprocess contribution.</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Group / subprocess</th><th class="num">Avg W</th><th class="num">Wh est.</th><th class="num">CPU sec</th><th class="num">IO MB</th><th class="num">RSS MB</th><th>Share</th></tr></thead>
+          <tbody id="groupRows"></tbody>
+        </table></div>
+      </section>
+    </main>
+  </div>
   <div id="tip"></div>
 <script type="module" src="/assets/app.js"></script>
 </body>

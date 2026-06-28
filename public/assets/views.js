@@ -7,8 +7,9 @@ let groupsData = null;
 export function renderStatus(status) {
   const b = status.latestBattery;
   setText('battery', b ? fmtPct(b.capacity) : '—');
-  setText('status', b ? (b.on_battery ? 'unplugged / ' : 'plugged / ') + (b.status || 'unknown') : 'no sample yet');
+  renderBatteryStatus(b);
   setText('watts', b ? fmtW(b.power_w) : '—');
+  updateGauge(b);
 
   const d = status.dischargeEstimate;
   setText('rateLabel', d?.mode === 'charging' ? 'Charge rate' : d?.mode === 'discharging' ? 'Drain rate' : 'Battery rate');
@@ -16,16 +17,17 @@ export function renderStatus(status) {
   setText('lasts', d?.hoursToFull ? 'full ~' + fmtDuration(d.hoursToFull) + ' / ' + d.detail : d?.hoursRemaining ? 'lasts ~' + fmtDuration(d.hoursRemaining) + ' / ' + d.detail : (d?.detail || 'estimating'));
 
   setText('poll', b ? fmtTime(b.ts) : '—');
-  setText('samples', (status.processRows || 0) + ' process rows stored');
+  const db = status.dbStats;
+  setText('samples', db ? formatDbStats(db) : '—');
 
   const e = status.latestEnvironment;
   const screenState = e ? [e.screen_locked ? 'locked' : '', e.lid_closed ? 'lid closed' : ''].filter(Boolean).join(' / ') : '';
   setText('screen', e ? (e.brightness_percent == null ? 'brightness ?' : fmtPct(e.brightness_percent)) : '—');
   setText('theme', e ? ((e.theme || 'unknown') + ' theme / ' + (e.brightness_source || 'no backlight') + (screenState ? ' / ' + screenState : '')) : '—');
-  setText('media', e ? ((e.audio_playing ? 'audio' : 'silent') + ' / ' + (e.video_streaming ? 'video?' : 'no video')) : '—');
-  setText('network', e ? ('RX ' + (e.net_rx_mbps || 0).toFixed(2) + ' Mbps / TX ' + (e.net_tx_mbps || 0).toFixed(2) + ' Mbps') : '—');
-  setText('fan', e?.fan_rpm == null ? '—' : Math.round(e.fan_rpm) + ' RPM');
-  setText('fanSource', e?.fan_source || 'no hwmon fan sensor');
+  const usbPower = e?.usb_power_source == null ? '' : e.usb_power_source ? ' / USB source' : ' / USB sink';
+  const usbWatts = e?.usb_power_w == null ? '' : ' ' + Number(e.usb_power_w).toFixed(2) + ' W';
+  setText('media', e ? ((e.audio_playing ? 'audio' : 'silent') + ' / ' + (e.video_streaming ? 'video?' : 'no video') + usbPower) : '—');
+  setText('network', e ? ('RX ' + (e.net_rx_mbps || 0).toFixed(2) + ' Mbps / TX ' + (e.net_tx_mbps || 0).toFixed(2) + usbWatts) : '—');
   setText('focusApp', e?.focused_app || '—');
   setText('focusTitle', e?.focused_title || 'optional niri helper not running');
 }
@@ -96,6 +98,65 @@ function addChildren(rows, group) {
       '<td>' + (((c.wattSamples || 0) / total) * 100).toFixed(1) + '%</td>' +
       '</tr>');
   }
+}
+
+function renderBatteryStatus(b) {
+  const el = document.getElementById('status');
+  if (!el) return;
+
+  if (!b) {
+    el.title = 'no sample yet';
+    el.setAttribute('aria-label', 'no sample yet');
+    el.innerHTML = statusIcon('unknown', 'no sample yet');
+    return;
+  }
+
+  const powerLabel = b.on_battery ? 'unplugged' : 'plugged';
+  const statusLabels = String(b.status || 'unknown').split(',').map(s => s.trim()).filter(Boolean);
+  const labels = statusLabels.length ? statusLabels : ['unknown'];
+  const fullLabel = powerLabel + ' / ' + labels.join(', ');
+  el.title = fullLabel;
+  el.setAttribute('aria-label', fullLabel);
+  el.innerHTML = [
+    statusIcon(b.on_battery ? 'unplugged' : 'plugged', powerLabel),
+    ...labels.map(label => statusIcon(batteryStatusKind(label), label)),
+  ].join('');
+}
+
+function batteryStatusKind(label) {
+  const s = String(label || '').toLowerCase();
+  if (s.includes('not charging')) return 'not-charging';
+  if (s.includes('discharging')) return 'discharging';
+  if (s.includes('charging')) return 'charging';
+  if (s.includes('full')) return 'full';
+  if (s.includes('ac')) return 'plugged';
+  return 'unknown';
+}
+
+function statusIcon(kind, label) {
+  return '<span class="battery-status-ico is-' + kind + '" role="img" title="' + escapeAttr(label) + '" aria-label="' + escapeAttr(label) + '"></span>';
+}
+
+function updateGauge(b) {
+  const el = document.getElementById('batteryGauge');
+  if (!el) return;
+  const pct = b && b.capacity != null ? Math.max(0, Math.min(100, b.capacity)) : 0;
+  const color = !b ? '#8f8f8f' : pct <= 15 ? '#ee0000' : b.on_battery ? '#f5a623' : '#0070f3';
+  el.style.setProperty('--pct', String(pct));
+  el.style.setProperty('--gauge', color);
+}
+
+function formatDbStats(db) {
+  const days = db.spanDays == null ? '— days' : db.spanDays < 1 ? '<1 day' : db.spanDays.toFixed(db.spanDays < 10 ? 1 : 0) + ' days';
+  return days + ' · ' + formatBytes(db.sizeBytes || 0);
+}
+
+function formatBytes(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = Number(bytes) || 0;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+  return value.toFixed(i === 0 ? 0 : value < 10 ? 1 : 0) + ' ' + units[i];
 }
 
 function setText(id, value) {

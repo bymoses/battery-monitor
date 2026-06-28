@@ -96,6 +96,7 @@ function boot() {
   setupTabs();
   setupTimelineHover();
   window.addEventListener('resize', drawCharts);
+  window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', drawCharts);
   document.getElementById('refresh').onclick = () => refresh({ full: true }).catch(console.error);
   document.getElementById('hours').onchange = () => refresh({ full: true }).catch(console.error);
   document.getElementById('top').onchange = () => refresh({ full: true }).catch(console.error);

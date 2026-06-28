@@ -9,8 +9,13 @@
 *.pid
 focused-window.json
 
-# deps/build
+# Rust build/cache
+/target/
+/.cargo-cache/
+
+# JS deps/build
 node_modules/
+/public.bak/
 dist/
 .tmp/
 .cache/
